@@ -2,12 +2,12 @@ use std::path::Path;
 use uuid::Uuid;
 use chrono::Utc;
 
-use ledger_db::model::*;
-use ledger_db::storage::binary::{read_accounts_bin, read_transactions_bin, read_entries_bin};
-use ledger_db::storage::accounts::write_account_bin_and_index;
-use ledger_db::storage::transactions::write_transaction_bin_and_index;
-use ledger_db::storage::entries::write_entry_bin_and_index;
-use ledger_db::index::btree::BTreeIndex;
+use ZentryDB::model::*;
+use ZentryDB::storage::binary::{read_accounts_bin, read_transactions_bin, read_entries_bin};
+use ZentryDB::storage::accounts::write_account_bin_and_index;
+use ZentryDB::storage::transactions::write_transaction_bin_and_index;
+use ZentryDB::storage::entries::write_entry_bin_and_index;
+use ZentryDB::index::btree::BTreeIndex;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut account_index = BTreeIndex::load(Path::new("data/accounts.idx"))?;
