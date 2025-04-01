@@ -28,7 +28,7 @@ pub struct Transaction {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub id: Uuid,
     pub transaction_id: Uuid,

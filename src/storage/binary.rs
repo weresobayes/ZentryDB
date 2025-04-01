@@ -216,3 +216,42 @@ pub fn read_transactions_bin(path: &Path) -> std::io::Result<Vec<Transaction>> {
 
     Ok(transactions)
 }
+
+pub fn read_entries_bin(path: &Path) -> std::io::Result<Vec<Entry>> {
+    let mut file = BufReader::new(File::open(path)?);
+    let mut entries = Vec::new();
+
+    loop {
+        let mut id_bytes = [0u8; 16];
+        if (file.read_exact(&mut id_bytes)).is_err() {
+            break;
+        }
+
+        let mut transaction_id_bytes = [0u8; 16];
+        if (file.read_exact(&mut transaction_id_bytes)).is_err() {
+            break;
+        }
+
+        let mut account_id_bytes = [0u8; 16];
+        if (file.read_exact(&mut account_id_bytes)).is_err() {
+            break;
+        }
+
+        let mut amount_bytes = [0u8; 8];
+        if (file.read_exact(&mut amount_bytes)).is_err() {
+            break;
+        }
+        let amount = f64::from_le_bytes(amount_bytes);
+
+        entries.push(Entry {
+            id: Uuid::from_bytes(id_bytes),
+            transaction_id: Uuid::from_bytes(transaction_id_bytes),
+            account_id: Uuid::from_bytes(account_id_bytes),
+            amount,
+        });
+    }
+
+    Ok(entries)
+}
+
+        
