@@ -6,7 +6,7 @@ use uuid::Uuid;
 use chrono::{TimeZone, Utc};
 use serde_json::{from_slice, to_vec, Value};
 
-use crate::model::{Account, AccountType, Transaction};
+use crate::model::{Account, AccountType, Entry, Transaction};
 
 fn account_type_to_byte(account_type: &AccountType) -> u8 {
     match account_type {
@@ -102,6 +102,22 @@ pub fn write_transaction_bin(transaction: &Transaction, path: &Path) -> std::io:
     Ok(())
 }
 
+pub fn write_entry_bin(entry: &Entry, path: &Path) -> std::io::Result<()> {
+    let file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    
+    let mut writer = BufWriter::new(file);
+
+    writer.write_all(entry.id.as_bytes())?;
+    writer.write_all(entry.transaction_id.as_bytes())?;
+    writer.write_all(entry.account_id.as_bytes())?;
+    writer.write_all(&entry.amount.to_le_bytes())?;
+    
+    Ok(())
+}
+
 pub fn read_accounts_bin(path: &Path) -> std::io::Result<Vec<Account>> {
     let mut file = BufReader::new(File::open(path)?);
     let mut accounts = Vec::new();
@@ -144,7 +160,7 @@ fn read_metadata<R: Read>(reader: &mut R) -> std::io::Result<Option<Value>> {
     let mut tag = [0u8; 1];
     reader.read_exact(&mut tag)?;
 
-    if (tag[0] == 0) {
+    if tag[0] == 0 {
         return Ok(None)
     } else {
         let mut len_buf = [0u8; 4];
