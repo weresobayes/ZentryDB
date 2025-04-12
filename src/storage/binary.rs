@@ -194,6 +194,70 @@ pub fn write_conversion_graph_bin(graph: &ConversionGraph, path: &Path) -> std::
     Ok(())
 }
 
+pub fn write_historical_conversion_graph_bin(graph: &ConversionGraph, path: &Path) -> std::io::Result<()> {
+    let file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    
+    let mut writer = BufWriter::new(file);
+
+    // Write graph string (includes time range)
+    let graph_bytes = graph.graph.as_bytes();
+    let graph_len = graph_bytes.len();
+    if graph_len > 255 {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "Graph string is too long",
+        ));
+    }
+    writer.write_all(&[graph_len as u8])?;
+    writer.write_all(graph_bytes)?;
+
+    // Write rate
+    writer.write_all(&graph.rate.to_le_bytes())?;
+
+    // Write timestamp
+    let timestamp = graph.rate_since.timestamp();
+    writer.write_all(&timestamp.to_le_bytes())?;
+    
+    Ok(())
+}
+
+pub fn rewrite_conversion_graphs_bin(graphs: &[ConversionGraph], path: &Path) -> std::io::Result<()> {
+    // Create new file, truncating any existing content
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    
+    let mut writer = BufWriter::new(file);
+
+    for graph in graphs {
+        // Write graph string
+        let graph_bytes = graph.graph.as_bytes();
+        let graph_len = graph_bytes.len();
+        if graph_len > 255 {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "Graph string is too long",
+            ));
+        }
+        writer.write_all(&[graph_len as u8])?;
+        writer.write_all(graph_bytes)?;
+
+        // Write rate
+        writer.write_all(&graph.rate.to_le_bytes())?;
+
+        // Write timestamp
+        let timestamp = graph.rate_since.timestamp();
+        writer.write_all(&timestamp.to_le_bytes())?;
+    }
+    
+    Ok(())
+}
+
 pub fn read_accounts_bin(path: &Path) -> std::io::Result<Vec<Account>> {
     let mut file = BufReader::new(File::open(path)?);
     let mut accounts = Vec::new();

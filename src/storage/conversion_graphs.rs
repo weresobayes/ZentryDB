@@ -1,5 +1,4 @@
-use std::{fs::OpenOptions, io::{BufRead, BufReader, Seek, BufWriter, SeekFrom, Write}};
-use std::path::Path;
+use std::{fs::OpenOptions, io::{BufRead, BufReader, Seek, BufWriter, SeekFrom, Write, Read}, path::Path};
 
 use serde_json::{from_str, to_string};
 
@@ -39,6 +38,24 @@ pub fn write_conversion_graph(graph: &ConversionGraph) -> std::io::Result<()> {
 
     let json = to_string(graph)?;
     writeln!(writer, "{}", json)?;
+
+    Ok(())
+}
+
+pub fn zero_conversion_graph_at_offset(bin_path: &Path, offset: u64) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(bin_path)?;
+    
+    file.seek(SeekFrom::Start(offset))?;
+    let mut len_buf = [0u8; 1];
+    file.read_exact(&mut len_buf)?;
+    let graph_len = len_buf[0] as usize;
+    
+    file.seek(SeekFrom::Start(offset))?;
+    let zeros = vec![0u8; 1 + graph_len + 8 + 8];
+    file.write_all(&zeros)?;
 
     Ok(())
 }

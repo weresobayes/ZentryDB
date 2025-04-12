@@ -10,8 +10,9 @@ use crate::storage::accounts::write_account_bin_and_index;
 use crate::storage::transactions::write_transaction_bin_and_index;
 use crate::storage::entries::write_entry_bin_and_index;
 use crate::storage::systems::write_system_bin_and_index;
-use crate::storage::conversion_graphs::write_conversion_graph_bin_and_index;
+use crate::storage::conversion_graphs::{write_conversion_graph_bin_and_index, zero_conversion_graph_at_offset};
 use crate::util::uuid::generate_deterministic_uuid;
+use chrono::{DateTime, Utc};
 
 static ACCOUNT_BIN_PATH: Lazy<&'static Path> = Lazy::new(|| Path::new("data/accounts.bin"));
 static TRANSACTION_BIN_PATH: Lazy<&'static Path> = Lazy::new(|| Path::new("data/transactions.bin"));
@@ -89,6 +90,37 @@ impl Ledger {
         Ok(())
     }
 
+    /// Archives an existing conversion graph by appending it to history with a time range key
+    fn archive_conversion_graph(&mut self, graph: &ConversionGraph, expired_at: DateTime<Utc>) -> std::io::Result<()> {
+        // Create historical version of the old graph
+        let historical_graph = ConversionGraph {
+            graph: format!("{}[{}]{}", 
+                graph.rate_since.to_rfc3339(),
+                graph.graph,
+                expired_at.to_rfc3339()
+            ),
+            rate: graph.rate,
+            rate_since: graph.rate_since,
+        };
+
+        // Get the old graph's offset from index
+        let old_uuid = generate_deterministic_uuid(&graph.graph);
+
+        // Zero out old record if it exists
+        if let Some(offset) = self.conversion_graph_index.get(&old_uuid) {
+            zero_conversion_graph_at_offset(*CONVERSION_GRAPH_BIN_PATH, offset)?;
+        }
+
+        // Append historical version to storage
+        write_conversion_graph_bin_and_index(&historical_graph, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+        
+        // Update in-memory map - insert or update
+        let historical_uuid = generate_deterministic_uuid(&historical_graph.graph);
+        self.conversion_graphs.insert(historical_uuid, historical_graph);
+        
+        Ok(())
+    }
+
     /// Creates a conversion relationship between systems based on the graph string format.
     /// Accepts formats:
     /// - One-way: "USD -> IDR" or "USD <- IDR"
@@ -122,41 +154,77 @@ impl Ledger {
             ));
         }
 
+        let now = Utc::now();
+
         match direction {
             "->" => {
-                // Standard forward direction, use as is
+                // Check if conversion already exists
+                let graph_key = format!("{} -> {}", from_system, to_system);
+                let existing_uuid = generate_deterministic_uuid(&graph_key);
+                
+                // Clone existing graph if it exists, then archive it
+                if let Some(existing) = self.conversion_graphs.get(&existing_uuid).cloned() {
+                    self.archive_conversion_graph(&existing, now)?;
+                }
+                
+                // Create new conversion
+                graph.graph = graph_key;
+                graph.rate_since = now;
                 let uuid = generate_deterministic_uuid(&graph.graph);
                 write_conversion_graph_bin_and_index(&graph, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
-                self.conversion_graphs.insert(uuid, graph);
+                self.conversion_graphs.entry(uuid).and_modify(|e| *e = graph.clone()).or_insert(graph);
             }
             "<-" => {
-                // Reverse direction, swap systems and invert rate
-                graph.graph = format!("{} -> {}", to_system, from_system);
+                // Check if conversion already exists
+                let graph_key = format!("{} -> {}", to_system, from_system);
+                let existing_uuid = generate_deterministic_uuid(&graph_key);
+                
+                // Clone existing graph if it exists, then archive it
+                if let Some(existing) = self.conversion_graphs.get(&existing_uuid).cloned() {
+                    self.archive_conversion_graph(&existing, now)?;
+                }
+                
+                // Create new conversion
+                graph.graph = graph_key;
+                graph.rate_since = now;
                 let uuid = generate_deterministic_uuid(&graph.graph);
                 write_conversion_graph_bin_and_index(&graph, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
-                self.conversion_graphs.insert(uuid, graph);
+                self.conversion_graphs.entry(uuid).and_modify(|e| *e = graph.clone()).or_insert(graph);
             }
             "<->" => {
-                // Bidirectional, create both conversions
-                // Forward direction
+                // Check and archive both directions if they exist
+                let forward_key = format!("{} -> {}", from_system, to_system);
+                let reverse_key = format!("{} -> {}", to_system, from_system);
+                
+                let forward_uuid = generate_deterministic_uuid(&forward_key);
+                let reverse_uuid = generate_deterministic_uuid(&reverse_key);
+                
+                // Clone and archive existing conversions
+                if let Some(existing) = self.conversion_graphs.get(&forward_uuid).cloned() {
+                    self.archive_conversion_graph(&existing, now)?;
+                }
+                if let Some(existing) = self.conversion_graphs.get(&reverse_uuid).cloned() {
+                    self.archive_conversion_graph(&existing, now)?;
+                }
+
+                // Create new bidirectional conversions
                 let forward = ConversionGraph {
-                    graph: format!("{} -> {}", from_system, to_system),
+                    graph: forward_key,
                     rate: graph.rate,
-                    rate_since: graph.rate_since,
+                    rate_since: now,
                 };
                 let uuid = generate_deterministic_uuid(&forward.graph);
                 write_conversion_graph_bin_and_index(&forward, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
-                self.conversion_graphs.insert(uuid, forward);
+                self.conversion_graphs.entry(uuid).and_modify(|e| *e = forward.clone()).or_insert(forward);
 
-                // Reverse direction
                 let reverse = ConversionGraph {
-                    graph: format!("{} -> {}", to_system, from_system),
+                    graph: reverse_key,
                     rate: 1.0 / graph.rate,
-                    rate_since: graph.rate_since,
+                    rate_since: now,
                 };
                 let uuid = generate_deterministic_uuid(&reverse.graph);
                 write_conversion_graph_bin_and_index(&reverse, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
-                self.conversion_graphs.insert(uuid, reverse);
+                self.conversion_graphs.entry(uuid).and_modify(|e| *e = reverse.clone()).or_insert(reverse);
             }
             _ => {
                 return Err(std::io::Error::new(
