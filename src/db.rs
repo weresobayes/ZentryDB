@@ -89,10 +89,83 @@ impl Ledger {
         Ok(())
     }
 
-    pub fn create_conversion_graph(&mut self, graph: ConversionGraph) -> std::io::Result<()> {
-        write_conversion_graph_bin_and_index(&graph, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
-        let uuid = generate_deterministic_uuid(&graph.graph);
-        self.conversion_graphs.insert(uuid, graph);
+    /// Creates a conversion relationship between systems based on the graph string format.
+    /// Accepts formats:
+    /// - One-way: "USD -> IDR" or "USD <- IDR"
+    /// - Two-way: "USD <-> SGD"
+    pub fn create_conversion_graph(&mut self, mut graph: ConversionGraph) -> std::io::Result<()> {
+        // Parse the graph string to get systems and direction
+        let parts: Vec<&str> = graph.graph.split_whitespace().collect();
+        if parts.len() != 3 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid graph format: {}", graph.graph),
+            ));
+        }
+
+        let (from_system, direction, to_system) = (parts[0], parts[1], parts[2]);
+        
+        // Validate both systems exist
+        let from_uuid = generate_deterministic_uuid(&from_system);
+        let to_uuid = generate_deterministic_uuid(&to_system);
+
+        if !self.systems.contains_key(&from_uuid) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Source system not found: {}", from_system),
+            ));
+        }
+        if !self.systems.contains_key(&to_uuid) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Target system not found: {}", to_system),
+            ));
+        }
+
+        match direction {
+            "->" => {
+                // Standard forward direction, use as is
+                let uuid = generate_deterministic_uuid(&graph.graph);
+                write_conversion_graph_bin_and_index(&graph, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+                self.conversion_graphs.insert(uuid, graph);
+            }
+            "<-" => {
+                // Reverse direction, swap systems and invert rate
+                graph.graph = format!("{} -> {}", to_system, from_system);
+                let uuid = generate_deterministic_uuid(&graph.graph);
+                write_conversion_graph_bin_and_index(&graph, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+                self.conversion_graphs.insert(uuid, graph);
+            }
+            "<->" => {
+                // Bidirectional, create both conversions
+                // Forward direction
+                let forward = ConversionGraph {
+                    graph: format!("{} -> {}", from_system, to_system),
+                    rate: graph.rate,
+                    rate_since: graph.rate_since,
+                };
+                let uuid = generate_deterministic_uuid(&forward.graph);
+                write_conversion_graph_bin_and_index(&forward, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+                self.conversion_graphs.insert(uuid, forward);
+
+                // Reverse direction
+                let reverse = ConversionGraph {
+                    graph: format!("{} -> {}", to_system, from_system),
+                    rate: 1.0 / graph.rate,
+                    rate_since: graph.rate_since,
+                };
+                let uuid = generate_deterministic_uuid(&reverse.graph);
+                write_conversion_graph_bin_and_index(&reverse, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+                self.conversion_graphs.insert(uuid, reverse);
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Invalid direction: {}. Must be ->, <-, or <->", direction),
+                ));
+            }
+        }
+
         Ok(())
     }
 

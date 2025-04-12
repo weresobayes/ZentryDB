@@ -1,7 +1,7 @@
 use chrono::Utc;
 use uuid::Uuid;
 use zentry_db::{
-    db::Ledger, install, model::{Account, AccountType, Entry, System, Transaction}
+    db::Ledger, install, model::{Account, AccountType, Entry, System, Transaction, ConversionGraph}
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -11,12 +11,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize ledger
     let mut ledger = Ledger::load_from_disk()?;
 
-    // Create currency system
+    // Create currency systems
     let idr_system = System {
         id: "IDR".to_string(),
         description: "Indonesian Rupiah".to_string(),
     };
     ledger.create_system(idr_system)?;
+
+    let usd_system = System {
+        id: "USD".to_string(),
+        description: "United States Dollar".to_string(),
+    };
+    ledger.create_system(usd_system)?;
+
+    let usd_to_idr = ConversionGraph {
+        graph: "USD <-> IDR".to_string(),
+        rate: 14000.0,
+        rate_since: Utc::now(),
+    };
+    ledger.create_conversion_graph(usd_to_idr)?;
 
     // Create accounts
     let first_account = Account {
