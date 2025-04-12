@@ -1,4 +1,21 @@
-## Next milestones:
+# Zentry
+
+
+a secure, fast, and minimal database engine for double-entry bookkeeping, purpose-built to serve as a transactional sentry in your system.
+
+
+## 🧭 Why Zentry?
+
+Zentry was born out of a recurring pattern I encountered across projects: the need for a reliable, purpose-built ledger to track transactions with double-entry guarantees — without dragging along the full weight of a general-purpose SQL database. While tools like PostgreSQL or MySQL are powerful, they often introduce unnecessary complexity and performance trade-offs when all you need is a lean, trustworthy, and auditable bookkeeping core.
+
+Rather than forcing these domain rules into external schema constraints and ORM logic, Zentry embraces the domain at its core. It’s optimized from the ground up to do one thing well: **capture and preserve financial state with integrity**.
+
+Zentry is designed to live alongside your services — as a sidecar, an embedded ledger, or a standalone transaction processor. Its binary storage format, B-Tree indexing, historical version tracking, and multi-system conversion model all serve the goal of making transactional state durable, understandable, and fast.
+
+This is the ledger I always wanted to use — so I built it.
+
+## 🗺️ Next milestones:
+
 
 ### ✅ Prefix Record Type on Key
 
