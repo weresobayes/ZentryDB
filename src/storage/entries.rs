@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::{from_str, to_string};
 
-use crate::index::btree::BTreeIndex;
+use crate::index::BTreeIndex;
 use crate::model::Entry;
 use crate::storage::binary::write_entry_bin;
 

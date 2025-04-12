@@ -1,6 +1,7 @@
 use uuid::Uuid;
 use std::collections::BTreeMap;
 
+#[derive(Debug)]
 pub struct BTreeIndex {
     tree: BTreeMap<Uuid, u64>,
 }

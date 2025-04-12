@@ -6,7 +6,7 @@ use uuid::Uuid;
 use chrono::{TimeZone, Utc};
 use serde_json::{from_slice, to_vec, Value};
 
-use crate::model::{Account, AccountType, Entry, Transaction};
+use crate::model::{Account, AccountType, Entry, Transaction, System, ConversionGraph};
 
 fn account_type_to_byte(account_type: &AccountType) -> u8 {
     match account_type {
@@ -58,6 +58,17 @@ pub fn write_account_bin(account: &Account, path: &Path) -> std::io::Result<()> 
 
     let timestamp = account.created_at.timestamp();
     writer.write_all(&timestamp.to_le_bytes())?;
+
+    let system_id_bytes = account.system_id.as_bytes();
+    let system_id_len = system_id_bytes.len();
+    if system_id_len > 255 {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "System ID is too long",
+        ));
+    }
+    writer.write_all(&[system_id_len as u8])?;
+    writer.write_all(system_id_bytes)?;
     
     Ok(())
 }
@@ -118,6 +129,71 @@ pub fn write_entry_bin(entry: &Entry, path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn write_system_bin(system: &System, path: &Path) -> std::io::Result<()> {
+    let file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    
+    let mut writer = BufWriter::new(file);
+
+    // Write system ID
+    let id_bytes = system.id.as_bytes();
+    let id_len = id_bytes.len();
+    if id_len > 255 {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "System ID is too long",
+        ));
+    }
+    writer.write_all(&[id_len as u8])?;
+    writer.write_all(id_bytes)?;
+
+    // Write description
+    let desc_bytes = system.description.as_bytes();
+    let desc_len = desc_bytes.len();
+    if desc_len > 255 {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "System description is too long",
+        ));
+    }
+    writer.write_all(&[desc_len as u8])?;
+    writer.write_all(desc_bytes)?;
+    
+    Ok(())
+}
+
+pub fn write_conversion_graph_bin(graph: &ConversionGraph, path: &Path) -> std::io::Result<()> {
+    let file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    
+    let mut writer = BufWriter::new(file);
+
+    // Write graph string
+    let graph_bytes = graph.graph.as_bytes();
+    let graph_len = graph_bytes.len();
+    if graph_len > 255 {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "Graph string is too long",
+        ));
+    }
+    writer.write_all(&[graph_len as u8])?;
+    writer.write_all(graph_bytes)?;
+
+    // Write rate
+    writer.write_all(&graph.rate.to_le_bytes())?;
+
+    // Write timestamp
+    let timestamp = graph.rate_since.timestamp();
+    writer.write_all(&timestamp.to_le_bytes())?;
+    
+    Ok(())
+}
+
 pub fn read_accounts_bin(path: &Path) -> std::io::Result<Vec<Account>> {
     let mut file = BufReader::new(File::open(path)?);
     let mut accounts = Vec::new();
@@ -145,11 +221,20 @@ pub fn read_accounts_bin(path: &Path) -> std::io::Result<Vec<Account>> {
         let timestamp = i64::from_le_bytes(timestamp_buf);
         let created_at = Utc.timestamp_opt(timestamp, 0).unwrap();
 
+        let mut system_id_len_buf = [0u8; 1];
+        file.read_exact(&mut system_id_len_buf)?;
+        let system_id_len = system_id_len_buf[0] as usize;
+
+        let mut system_id_buf = vec![0u8; system_id_len];
+        file.read_exact(&mut system_id_buf)?;
+        let system_id = String::from_utf8(system_id_buf).unwrap_or_default();
+
         accounts.push(Account {
             id: Uuid::from_bytes(id_bytes),
             name,
             account_type,
             created_at,
+            system_id,
         });
     }
 
@@ -254,4 +339,73 @@ pub fn read_entries_bin(path: &Path) -> std::io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-        
+pub fn read_systems_bin(path: &Path) -> std::io::Result<Vec<System>> {
+    let mut file = BufReader::new(File::open(path)?);
+    let mut systems = Vec::new();
+
+    loop {
+        // Read ID
+        let mut id_len_buf = [0u8; 1];
+        if file.read_exact(&mut id_len_buf).is_err() {
+            break;
+        }
+        let id_len = id_len_buf[0] as usize;
+
+        let mut id_buf = vec![0u8; id_len];
+        file.read_exact(&mut id_buf)?;
+        let id = String::from_utf8(id_buf).unwrap_or_default();
+
+        // Read description
+        let mut desc_len_buf = [0u8; 1];
+        file.read_exact(&mut desc_len_buf)?;
+        let desc_len = desc_len_buf[0] as usize;
+
+        let mut desc_buf = vec![0u8; desc_len];
+        file.read_exact(&mut desc_buf)?;
+        let description = String::from_utf8(desc_buf).unwrap_or_default();
+
+        systems.push(System {
+            id,
+            description,
+        });
+    }
+
+    Ok(systems)
+}
+
+pub fn read_conversion_graphs_bin(path: &Path) -> std::io::Result<Vec<ConversionGraph>> {
+    let mut file = BufReader::new(File::open(path)?);
+    let mut graphs = Vec::new();
+
+    loop {
+        // Read graph string
+        let mut graph_len_buf = [0u8; 1];
+        if file.read_exact(&mut graph_len_buf).is_err() {
+            break;
+        }
+        let graph_len = graph_len_buf[0] as usize;
+
+        let mut graph_buf = vec![0u8; graph_len];
+        file.read_exact(&mut graph_buf)?;
+        let graph = String::from_utf8(graph_buf).unwrap_or_default();
+
+        // Read rate
+        let mut rate_buf = [0u8; 8];
+        file.read_exact(&mut rate_buf)?;
+        let rate = f64::from_le_bytes(rate_buf);
+
+        // Read timestamp
+        let mut timestamp_buf = [0u8; 8];
+        file.read_exact(&mut timestamp_buf)?;
+        let timestamp = i64::from_le_bytes(timestamp_buf);
+        let rate_since = Utc.timestamp_opt(timestamp, 0).unwrap();
+
+        graphs.push(ConversionGraph {
+            graph,
+            rate,
+            rate_since,
+        });
+    }
+
+    Ok(graphs)
+}
