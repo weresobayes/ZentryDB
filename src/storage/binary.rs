@@ -7,6 +7,7 @@ use chrono::{TimeZone, Utc};
 use serde_json::{from_slice, to_vec, Value};
 
 use crate::model::{Account, AccountType, Entry, Transaction, System, ConversionGraph};
+use crate::storage::layout::{BinaryLayout, BinaryField, LengthType, account_layout, system_layout, conversion_graph_layout};
 
 fn account_type_to_byte(account_type: &AccountType) -> u8 {
     match account_type {
@@ -32,44 +33,74 @@ fn byte_to_account_type(byte: u8) -> std::io::Result<AccountType> {
     }
 }
 
+fn write_length_prefixed_field(writer: &mut BufWriter<File>, bytes: &[u8], name: &str, length_type: LengthType) -> std::io::Result<()> {
+    let len = bytes.len();
+    
+    match length_type {
+        LengthType::U8 if len <= u8::MAX as usize => {
+            writer.write_all(&[len as u8])?;
+        }
+        LengthType::U16 if len <= u16::MAX as usize => {
+            writer.write_all(&(len as u16).to_le_bytes())?;
+        }
+        LengthType::U32 => {
+            writer.write_all(&(len as u32).to_le_bytes())?;
+        }
+        _ => {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("{} is too long to encode", name),
+            ));
+        }
+    }
+
+    writer.write_all(bytes)
+}
+
 pub fn write_account_bin(account: &Account, path: &Path) -> std::io::Result<()> {
     let file = OpenOptions::new()
         .append(true)
         .create(true)
         .open(path)?;
-    
+
     let mut writer = BufWriter::new(file);
+    let layout = account_layout();
 
-    writer.write_all(account.id.as_bytes())?;
+    for field in layout.fields {
+        match field {
+            BinaryField::Uuid("id") => {
+                writer.write_all(account.id.as_bytes())?;
+            }
+            BinaryField::U8("account_type") => {
+                writer.write_all(&[account_type_to_byte(&account.account_type)])?;
+            }
+            BinaryField::I64("created_at") => {
+                let ts = account.created_at.timestamp();
+                writer.write_all(&ts.to_le_bytes())?;
+            }
+            BinaryField::LengthPrefixed { name, length_type } => {
+                let bytes = match name {
+                    "name" => account.name.as_bytes(),
+                    "system_id" => account.system_id.as_bytes(),
+                    _ => {
+                        return Err(std::io::Error::new(
+                            ErrorKind::InvalidInput,
+                            format!("Unknown field in layout: {}", name),
+                        ));
+                    }
+                };
 
-    let name_bytes = account.name.as_bytes();
-    let name_len = name_bytes.len();
-
-    if name_len > 255 {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "Account name is too long",
-        ));
+                write_length_prefixed_field(&mut writer, bytes, name, length_type)?;
+            }
+            other => {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Unexpected binary field in Account layout: {:?}", other),
+                ));
+            }
+        }
     }
-    writer.write_all(&[name_len as u8])?;
-    writer.write_all(name_bytes)?;
 
-    writer.write_all(&[account_type_to_byte(&account.account_type)])?;
-
-    let timestamp = account.created_at.timestamp();
-    writer.write_all(&timestamp.to_le_bytes())?;
-
-    let system_id_bytes = account.system_id.as_bytes();
-    let system_id_len = system_id_bytes.len();
-    if system_id_len > 255 {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "System ID is too long",
-        ));
-    }
-    writer.write_all(&[system_id_len as u8])?;
-    writer.write_all(system_id_bytes)?;
-    
     Ok(())
 }
 
@@ -136,31 +167,33 @@ pub fn write_system_bin(system: &System, path: &Path) -> std::io::Result<()> {
         .open(path)?;
     
     let mut writer = BufWriter::new(file);
+    let layout = system_layout();
 
-    // Write system ID
-    let id_bytes = system.id.as_bytes();
-    let id_len = id_bytes.len();
-    if id_len > 255 {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "System ID is too long",
-        ));
-    }
-    writer.write_all(&[id_len as u8])?;
-    writer.write_all(id_bytes)?;
+    for field in layout.fields {
+        match field {
+            BinaryField::LengthPrefixed { name, length_type } => {
+                let bytes = match name {
+                    "system_id" => system.id.as_bytes(),
+                    "description" => system.description.as_bytes(),
+                    _ => {
+                        return Err(std::io::Error::new(
+                            ErrorKind::InvalidInput,
+                            format!("Unknown field in layout: {}", name),
+                        ));
+                    }
+                };
 
-    // Write description
-    let desc_bytes = system.description.as_bytes();
-    let desc_len = desc_bytes.len();
-    if desc_len > 255 {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "System description is too long",
-        ));
+                write_length_prefixed_field(&mut writer, bytes, name, length_type)?;
+            }
+            other => {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Unexpected binary field in System layout: {:?}", other),
+                ));
+            }
+        }
     }
-    writer.write_all(&[desc_len as u8])?;
-    writer.write_all(desc_bytes)?;
-    
+
     Ok(())
 }
 
@@ -171,90 +204,39 @@ pub fn write_conversion_graph_bin(graph: &ConversionGraph, path: &Path) -> std::
         .open(path)?;
     
     let mut writer = BufWriter::new(file);
+    let layout = conversion_graph_layout();
 
-    // Write graph string
-    let graph_bytes = graph.graph.as_bytes();
-    let graph_len = graph_bytes.len();
-    if graph_len > 255 {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "Graph string is too long",
-        ));
-    }
-    writer.write_all(&[graph_len as u8])?;
-    writer.write_all(graph_bytes)?;
+    for field in layout.fields {
+        match field {
+            BinaryField::LengthPrefixed { name, length_type } => {
+                let bytes = match name {
+                    "graph" => graph.graph.as_bytes(),
+                    _ => {
+                        return Err(std::io::Error::new(
+                            ErrorKind::InvalidInput,
+                            format!("Unknown field in layout: {}", name),
+                        ));
+                    }
+                };
 
-    // Write rate
-    writer.write_all(&graph.rate.to_le_bytes())?;
-
-    // Write timestamp
-    let timestamp = graph.rate_since.timestamp();
-    writer.write_all(&timestamp.to_le_bytes())?;
-    
-    Ok(())
-}
-
-pub fn write_historical_conversion_graph_bin(graph: &ConversionGraph, path: &Path) -> std::io::Result<()> {
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    
-    let mut writer = BufWriter::new(file);
-
-    // Write graph string (includes time range)
-    let graph_bytes = graph.graph.as_bytes();
-    let graph_len = graph_bytes.len();
-    if graph_len > 255 {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "Graph string is too long",
-        ));
-    }
-    writer.write_all(&[graph_len as u8])?;
-    writer.write_all(graph_bytes)?;
-
-    // Write rate
-    writer.write_all(&graph.rate.to_le_bytes())?;
-
-    // Write timestamp
-    let timestamp = graph.rate_since.timestamp();
-    writer.write_all(&timestamp.to_le_bytes())?;
-    
-    Ok(())
-}
-
-pub fn rewrite_conversion_graphs_bin(graphs: &[ConversionGraph], path: &Path) -> std::io::Result<()> {
-    // Create new file, truncating any existing content
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    
-    let mut writer = BufWriter::new(file);
-
-    for graph in graphs {
-        // Write graph string
-        let graph_bytes = graph.graph.as_bytes();
-        let graph_len = graph_bytes.len();
-        if graph_len > 255 {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "Graph string is too long",
-            ));
+                write_length_prefixed_field(&mut writer, bytes, name, length_type)?;
+            }
+            BinaryField::F64("rate") => {
+                writer.write_all(&graph.rate.to_le_bytes())?;
+            }
+            BinaryField::I64("rate_since") => {
+                let timestamp = graph.rate_since.timestamp();
+                writer.write_all(&timestamp.to_le_bytes())?;
+            }
+            other => {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Unexpected binary field in ConversionGraph layout: {:?}", other),
+                ));
+            }
         }
-        writer.write_all(&[graph_len as u8])?;
-        writer.write_all(graph_bytes)?;
-
-        // Write rate
-        writer.write_all(&graph.rate.to_le_bytes())?;
-
-        // Write timestamp
-        let timestamp = graph.rate_since.timestamp();
-        writer.write_all(&timestamp.to_le_bytes())?;
     }
-    
+
     Ok(())
 }
 
@@ -472,4 +454,59 @@ pub fn read_conversion_graphs_bin(path: &Path) -> std::io::Result<Vec<Conversion
     }
 
     Ok(graphs)
+}
+
+pub fn compute_object_size(layout: &BinaryLayout, data: &[u8], offset: usize) -> std::io::Result<usize> {
+    let mut cursor = offset;
+    let mut total_size = 0;
+
+    for field in &layout.fields {
+        match field {
+            BinaryField::Uuid(_) => {
+                total_size += 16;
+                cursor += 16;
+            }
+            BinaryField::U8(_) => {
+                total_size += 1;
+                cursor += 1;
+            }
+            BinaryField::U32(_) => {
+                total_size += 4;
+                cursor += 4;
+            }
+            BinaryField::I64(_) | BinaryField::F64(_) => {
+                total_size += 8;
+                cursor += 8;
+            }
+            BinaryField::LengthPrefixed { name: _, length_type } => {
+                let len_size = length_type.byte_len();
+
+                if cursor + len_size > data.len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Not enough data for length prefix",
+                    ));
+                }
+
+                let length = match length_type {
+                    LengthType::U8 => data[cursor] as usize,
+                    LengthType::U16 => {
+                        let mut buf = [0u8; 2];
+                        buf.copy_from_slice(&data[cursor..cursor + 2]);
+                        u16::from_le_bytes(buf) as usize
+                    }
+                    LengthType::U32 => {
+                        let mut buf = [0u8; 4];
+                        buf.copy_from_slice(&data[cursor..cursor + 4]);
+                        u32::from_le_bytes(buf) as usize
+                    }
+                };
+
+                total_size += len_size + length;
+                cursor += len_size + length;
+            }
+        }
+    }
+
+    Ok(total_size)
 }
