@@ -103,10 +103,8 @@ impl Ledger {
             rate_since: graph.rate_since,
         };
 
-        // Get the old graph's offset from index
+        // Get the old graph's offset from index and zero out old record if it exists
         let old_uuid = generate_deterministic_uuid(&graph.graph);
-
-        // Zero out old record if it exists
         if let Some(offset) = self.conversion_graph_index.get(&old_uuid) {
             zero_conversion_graph_at_offset(*CONVERSION_GRAPH_BIN_PATH, offset)?;
         }
