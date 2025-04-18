@@ -1,7 +1,8 @@
 use std::fs::{OpenOptions, File};
-use std::io::{BufReader, Read, BufWriter, Write, ErrorKind};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::Path;
 
+use regex::Regex;
 use uuid::Uuid;
 use chrono::{TimeZone, Utc};
 use serde_json::{from_slice, to_vec, Value};
@@ -18,6 +19,22 @@ fn account_type_to_byte(account_type: &AccountType) -> u8 {
         AccountType::Expense => 4,
     }
 }
+
+fn classify_graph_key(graph: &ConversionGraph) -> &'static str {
+    let active_conversion_key_pattern = Regex::new(r"^\s*\w+\s*(->|<-|<->)\s*\w+\s*$").unwrap();
+    let historical_conversion_key_pattern = Regex::new(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+\d{2}:\d{2}\[\s*\w+\s*(->|<-|<->)\s*\w+\s*\]\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+\d{2}:\d{2}$"
+    ).unwrap();
+
+    if historical_conversion_key_pattern.is_match(&graph.graph) {
+        return "historical";
+    } else if active_conversion_key_pattern.is_match(&graph.graph) {
+        return "active";
+    }
+
+    "unknown"
+}
+    
 
 fn byte_to_account_type(byte: u8) -> std::io::Result<AccountType> {
     match byte {
@@ -210,7 +227,24 @@ pub fn write_conversion_graph_bin(graph: &ConversionGraph, path: &Path) -> std::
         match field {
             BinaryField::LengthPrefixed { name, length_type } => {
                 let bytes = match name {
-                    "graph" => graph.graph.as_bytes(),
+                    "graph" => {
+                        let key_class = classify_graph_key(graph);
+
+                        match key_class {
+                            "active" => {
+                                format!("C[{}]", graph.graph).into_bytes()
+                            }
+                            "historical" => {
+                                format!("H[{}]", graph.graph).into_bytes()
+                            }
+                            _ => {
+                                return Err(std::io::Error::new(
+                                    ErrorKind::InvalidInput,
+                                    format!("Unknown graph key class: {}", key_class),
+                                ));
+                            }
+                        }
+                    }
                     _ => {
                         return Err(std::io::Error::new(
                             ErrorKind::InvalidInput,
@@ -219,7 +253,7 @@ pub fn write_conversion_graph_bin(graph: &ConversionGraph, path: &Path) -> std::
                     }
                 };
 
-                write_length_prefixed_field(&mut writer, bytes, name, length_type)?;
+                write_length_prefixed_field(&mut writer, &bytes, name, length_type)?;
             }
             BinaryField::F64("rate") => {
                 writer.write_all(&graph.rate.to_le_bytes())?;
@@ -430,6 +464,18 @@ pub fn read_conversion_graphs_bin(path: &Path) -> std::io::Result<Vec<Conversion
             break;
         }
         let graph_len = graph_len_buf[0] as usize;
+
+        let buf = file.fill_buf()?;
+        if buf.len() < 1 {
+            break;
+        }
+
+        let tag = buf[0];
+        if tag != b'H' {
+            let skip_by = graph_len + 8 + 8;
+            file.consume(skip_by);
+            continue;
+        }
 
         let mut graph_buf = vec![0u8; graph_len];
         file.read_exact(&mut graph_buf)?;

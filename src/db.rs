@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 
 use crate::index::BTreeIndex;
 use crate::model::{Transaction, Entry, Account, System, ConversionGraph};
-use crate::storage::{load_accounts, load_conversion_graphs, load_entries, load_systems, load_transactions};
+use crate::storage::{load_accounts, load_conversion_graphs_from_bin, load_entries, load_systems, load_transactions};
 use crate::storage::accounts::write_account_bin_and_index;
 use crate::storage::transactions::write_transaction_bin_and_index;
 use crate::storage::entries::write_entry_bin_and_index;
@@ -47,7 +47,7 @@ impl Ledger {
         let transactions_list = load_transactions()?;
         let entries_list = load_entries()?;
         let systems_list = load_systems()?;
-        let conversion_graphs_list = load_conversion_graphs()?;
+        let conversion_graphs_list = load_conversion_graphs_from_bin(*CONVERSION_GRAPH_BIN_PATH)?;
 
         let accounts: HashMap<Uuid, Account> = accounts_list.into_iter().map(|account| (account.id, account)).collect();
         let transactions: HashMap<Uuid, Transaction> = transactions_list.into_iter().map(|transaction| (transaction.id, transaction)).collect();

@@ -16,6 +16,12 @@ This is the ledger I always wanted to use — so I built it.
 
 ## 🗺️ Next milestones:
 
+*Legends*
+
+- ⬜️ = Not started
+- ⬛️ = In progress
+- ❌ = Cancelled / Can't be done
+- ✅ = Completed
 
 ### ✅ Prefix Record Type on Key
 
@@ -28,7 +34,7 @@ This allows Zentry to quickly identify record categories when scanning the `.bin
 
 ---
 
-### ✅ Compress Zeroing with Tombstone Byte
+### ⬜ Compress Zeroing with Tombstone Byte
 
 Rather than fully zeroing out old record space in the binary file, store a **1-byte tombstone prefix** at the beginning of each record:
 

@@ -31,52 +31,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     ledger.create_conversion_graph(usd_to_idr)?;
 
-    // Create accounts
-    let first_account = Account {
-        id: Uuid::new_v4(),
-        name: "Dwik cashes".to_string(),
-        account_type: AccountType::Asset,
-        created_at: Utc::now(),
-        system_id: "IDR".to_string(),
-    };
-    ledger.create_account(first_account.clone())?;
+    // // Create accounts
+    // let first_account = Account {
+    //     id: Uuid::new_v4(),
+    //     name: "Dwik cashes".to_string(),
+    //     account_type: AccountType::Asset,
+    //     created_at: Utc::now(),
+    //     system_id: "IDR".to_string(),
+    // };
+    // ledger.create_account(first_account.clone())?;
 
-    let second_account = Account {
-        id: Uuid::new_v4(),
-        name: "Dwik bank account".to_string(),
-        account_type: AccountType::Asset,
-        created_at: Utc::now(),
-        system_id: "IDR".to_string(),
-    };
-    ledger.create_account(second_account.clone())?;
-    println!("✅ Created accounts");
+    // let second_account = Account {
+    //     id: Uuid::new_v4(),
+    //     name: "Dwik bank account".to_string(),
+    //     account_type: AccountType::Asset,
+    //     created_at: Utc::now(),
+    //     system_id: "IDR".to_string(),
+    // };
+    // ledger.create_account(second_account.clone())?;
+    // println!("✅ Created accounts");
 
-    // Create transaction with entries
-    let transaction = Transaction {
-        id: Uuid::new_v4(),
-        description: "Transfer from Dwik bank to Dwik cashes".to_string(),
-        metadata: None,
-        timestamp: Utc::now(),
-    };
+    // // Create transaction with entries
+    // let transaction = Transaction {
+    //     id: Uuid::new_v4(),
+    //     description: "Transfer from Dwik bank to Dwik cashes".to_string(),
+    //     metadata: None,
+    //     timestamp: Utc::now(),
+    // };
 
-    let entries = vec![
-        Entry {
-            id: Uuid::new_v4(),
-            transaction_id: transaction.id,
-            account_id: second_account.id,
-            amount: 1000000000.0,
-        },
-        Entry {
-            id: Uuid::new_v4(),
-            transaction_id: transaction.id,
-            account_id: first_account.id,
-            amount: -1000000000.0,
-        },
-    ];
+    // let entries = vec![
+    //     Entry {
+    //         id: Uuid::new_v4(),
+    //         transaction_id: transaction.id,
+    //         account_id: second_account.id,
+    //         amount: 1000000000.0,
+    //     },
+    //     Entry {
+    //         id: Uuid::new_v4(),
+    //         transaction_id: transaction.id,
+    //         account_id: first_account.id,
+    //         amount: -1000000000.0,
+    //     },
+    // ];
 
-    // Record transaction (this will validate and write both transaction and entries)
-    ledger.record_transaction(transaction, entries)?;
-    println!("✅ Recorded transaction");
+    // // Record transaction (this will validate and write both transaction and entries)
+    // ledger.record_transaction(transaction, entries)?;
+    // println!("✅ Recorded transaction");
 
     // Print current state
     for (_, account) in ledger.accounts.iter() {

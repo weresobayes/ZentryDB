@@ -1,4 +1,4 @@
-use std::{fs::OpenOptions, io::{BufRead, BufReader, Seek, BufWriter, SeekFrom, Write, Read}, path::Path};
+use std::{fs::OpenOptions, io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write}, path::Path};
 
 use serde_json::{from_str, to_string};
 
@@ -6,6 +6,8 @@ use crate::index::BTreeIndex;
 use crate::model::ConversionGraph;
 use crate::storage::binary::write_conversion_graph_bin;
 use crate::util::uuid::generate_deterministic_uuid;
+
+use super::read_conversion_graphs_bin;
 
 pub fn write_conversion_graph_bin_and_index(
     graph: &ConversionGraph,
@@ -73,4 +75,8 @@ pub fn load_conversion_graphs() -> std::io::Result<Vec<ConversionGraph>> {
 
         Ok(graph)
     }).collect()
+}
+
+pub fn load_conversion_graphs_from_bin(bin_path: &Path) -> std::io::Result<Vec<ConversionGraph>> {
+    read_conversion_graphs_bin(bin_path)
 }
