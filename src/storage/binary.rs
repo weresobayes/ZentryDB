@@ -470,8 +470,9 @@ pub fn read_conversion_graphs_bin(path: &Path) -> std::io::Result<Vec<Conversion
             break;
         }
 
+        // if it's not a current/active conversion graph, skip
         let tag = buf[0];
-        if tag != b'H' {
+        if tag != b'C' {
             let skip_by = graph_len + 8 + 8;
             file.consume(skip_by);
             continue;
@@ -479,7 +480,17 @@ pub fn read_conversion_graphs_bin(path: &Path) -> std::io::Result<Vec<Conversion
 
         let mut graph_buf = vec![0u8; graph_len];
         file.read_exact(&mut graph_buf)?;
-        let graph = String::from_utf8(graph_buf).unwrap_or_default();
+        let graph_with_key = String::from_utf8(graph_buf).unwrap_or_default();
+
+        let re = Regex::new(r"C\[(.*?)\]").unwrap();
+
+        let mut graph = String::new();
+
+        if let Some(caps) = re.captures(&graph_with_key) {
+            if let Some(g) = caps.get(1) {
+                graph = g.as_str().to_string();
+            }
+        }
 
         // Read rate
         let mut rate_buf = [0u8; 8];

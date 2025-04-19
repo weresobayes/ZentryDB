@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 
 use crate::index::BTreeIndex;
 use crate::model::{Transaction, Entry, Account, System, ConversionGraph};
-use crate::storage::{load_accounts, load_conversion_graphs_from_bin, load_entries, load_systems, load_transactions};
+use crate::storage::{load_conversion_graphs_from_bin, load_accounts_from_bin, load_entries_from_bin, load_systems_from_bin, load_transactions_from_bin};
 use crate::storage::accounts::write_account_bin_and_index;
 use crate::storage::transactions::write_transaction_bin_and_index;
 use crate::storage::entries::write_entry_bin_and_index;
@@ -43,10 +43,11 @@ pub struct Ledger {
 
 impl Ledger {
     pub fn load_from_disk() -> std::io::Result<Self> {
-        let accounts_list = load_accounts()?;
-        let transactions_list = load_transactions()?;
-        let entries_list = load_entries()?;
-        let systems_list = load_systems()?;
+        let start = std::time::Instant::now();
+        let accounts_list = load_accounts_from_bin(*ACCOUNT_BIN_PATH)?;
+        let transactions_list = load_transactions_from_bin(*TRANSACTION_BIN_PATH)?;
+        let entries_list = load_entries_from_bin(*ENTRY_BIN_PATH)?;
+        let systems_list = load_systems_from_bin(*SYSTEM_BIN_PATH)?;
         let conversion_graphs_list = load_conversion_graphs_from_bin(*CONVERSION_GRAPH_BIN_PATH)?;
 
         let accounts: HashMap<Uuid, Account> = accounts_list.into_iter().map(|account| (account.id, account)).collect();
@@ -61,6 +62,9 @@ impl Ledger {
             let uuid = generate_deterministic_uuid(&graph.graph);
             (uuid, graph)
         }).collect();
+
+        let duration = start.elapsed();
+        println!("Completed loading ledger data. Took: {:?}", duration);
 
         Ok(Self {
             accounts,
@@ -102,6 +106,8 @@ impl Ledger {
             rate: graph.rate,
             rate_since: graph.rate_since,
         };
+
+        println!("Archiving conversion graph: {:?}", historical_graph);
 
         // Get the old graph's offset from index and zero out old record if it exists
         let old_uuid = generate_deterministic_uuid(&graph.graph);
@@ -209,7 +215,7 @@ impl Ledger {
                 let forward = ConversionGraph {
                     graph: forward_key,
                     rate: graph.rate,
-                    rate_since: now,
+                    rate_since: graph.rate_since,
                 };
                 let uuid = generate_deterministic_uuid(&forward.graph);
                 write_conversion_graph_bin_and_index(&forward, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
@@ -218,7 +224,7 @@ impl Ledger {
                 let reverse = ConversionGraph {
                     graph: reverse_key,
                     rate: 1.0 / graph.rate,
-                    rate_since: now,
+                    rate_since: graph.rate_since,
                 };
                 let uuid = generate_deterministic_uuid(&reverse.graph);
                 write_conversion_graph_bin_and_index(&reverse, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
