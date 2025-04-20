@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::{from_str, to_string};
 
-use crate::index::BTreeIndex;
+use crate::{index::BTreeIndex, read_transactions_bin};
 use crate::model::Transaction;
 use crate::storage::binary::write_transaction_bin;
 
@@ -50,5 +50,13 @@ pub fn load_transactions() -> std::io::Result<Vec<Transaction>> {
 
         Ok(transaction)
     }).collect()
+}
+
+pub fn load_transactions_from_bin(bin_path: &Path) -> std::io::Result<Vec<Transaction>> {
+    let start = std::time::Instant::now();
+    let result = read_transactions_bin(bin_path);
+    let duration = start.elapsed();
+    println!("Loading transactions took: {:?}", duration);
+    result
 }
     

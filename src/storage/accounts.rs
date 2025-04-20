@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::{from_str, to_string};
 
-use crate::index::BTreeIndex;
+use crate::{index::BTreeIndex, read_accounts_bin};
 use crate::model::Account;
 use crate::storage::binary::write_account_bin;
 
@@ -52,4 +52,12 @@ pub fn load_accounts() -> std::io::Result<Vec<Account>> {
 
         Ok(account)
     }).collect()
+}
+
+pub fn load_accounts_from_bin(bin_path: &Path) -> std::io::Result<Vec<Account>> {
+    let start = std::time::Instant::now();
+    let result = read_accounts_bin(bin_path);
+    let duration = start.elapsed();
+    println!("Loading accounts took: {:?}", duration);
+    result
 }
