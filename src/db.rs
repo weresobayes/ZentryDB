@@ -1,17 +1,19 @@
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 use uuid::Uuid;
 use once_cell::sync::Lazy;
 
 use crate::index::BTreeIndex;
 use crate::model::{Transaction, Entry, Account, System, ConversionGraph};
-use crate::storage::{load_conversion_graphs_from_bin, load_accounts_from_bin, load_entries_from_bin, load_systems_from_bin, load_transactions_from_bin};
 use crate::storage::accounts::write_account_bin_and_index;
 use crate::storage::transactions::write_transaction_bin_and_index;
 use crate::storage::entries::write_entry_bin_and_index;
 use crate::storage::systems::write_system_bin_and_index;
 use crate::storage::conversion_graphs::{write_conversion_graph_bin_and_index, zero_conversion_graph_at_offset};
 use crate::util::uuid::generate_deterministic_uuid;
+use crate::{account_layout, conversion_graph_layout, entry_layout, system_layout, transaction_layout, BinaryStorage, TombstoneReader};
 use chrono::{DateTime, Utc};
 
 static ACCOUNT_BIN_PATH: Lazy<&'static Path> = Lazy::new(|| Path::new("data/accounts.bin"));
@@ -28,6 +30,8 @@ static CONVERSION_GRAPH_IDX_PATH: Lazy<&'static Path> = Lazy::new(|| Path::new("
 
 #[derive(Debug)]
 pub struct Ledger {
+    pub storage: BinaryStorage,
+
     pub accounts: HashMap<Uuid, Account>,
     pub transactions: HashMap<Uuid, Transaction>,
     pub entries: Vec<Entry>,
@@ -44,29 +48,52 @@ pub struct Ledger {
 impl Ledger {
     pub fn load_from_disk() -> std::io::Result<Self> {
         let start = std::time::Instant::now();
-        let accounts_list = load_accounts_from_bin(*ACCOUNT_BIN_PATH)?;
-        let transactions_list = load_transactions_from_bin(*TRANSACTION_BIN_PATH)?;
-        let entries_list = load_entries_from_bin(*ENTRY_BIN_PATH)?;
-        let systems_list = load_systems_from_bin(*SYSTEM_BIN_PATH)?;
-        let conversion_graphs_list = load_conversion_graphs_from_bin(*CONVERSION_GRAPH_BIN_PATH)?;
+
+        // ---------------------------------------------------------------------------------
+
+        let mut readers = HashMap::new();
+        let mut layouts = HashMap::new();
+
+        readers.insert("accounts".to_string(), BufReader::new(File::open(*ACCOUNT_BIN_PATH).unwrap()));
+        readers.insert("transactions".to_string(), BufReader::new(File::open(*TRANSACTION_BIN_PATH).unwrap()));
+        readers.insert("entries".to_string(), BufReader::new(File::open(*ENTRY_BIN_PATH).unwrap()));
+        readers.insert("systems".to_string(), BufReader::new(File::open(*SYSTEM_BIN_PATH).unwrap()));
+        readers.insert("conversion_graphs".to_string(), BufReader::new(File::open(*CONVERSION_GRAPH_BIN_PATH).unwrap()));
+
+        layouts.insert("accounts".to_string(), account_layout());
+        layouts.insert("transactions".to_string(), transaction_layout());
+        layouts.insert("entries".to_string(), entry_layout());
+        layouts.insert("systems".to_string(), system_layout());
+        layouts.insert("conversion_graphs".to_string(), conversion_graph_layout());
+
+        let storage = BinaryStorage::new(readers, layouts);
+
+        let accounts_list = storage.read::<Account>()?;
+        let transactions_list = storage.read::<Transaction>()?;
+        let entries_list = storage.read::<Entry>()?;
+        let systems_list = storage.read::<System>()?;
+        let conversion_graphs_list = storage.read::<ConversionGraph>()?;
 
         let accounts: HashMap<Uuid, Account> = accounts_list.into_iter().map(|account| (account.id, account)).collect();
         let transactions: HashMap<Uuid, Transaction> = transactions_list.into_iter().map(|transaction| (transaction.id, transaction)).collect();
-
         let systems: HashMap<Uuid, System> = systems_list.into_iter().map(|system| {
             let uuid = generate_deterministic_uuid(&system.id);
             (uuid, system)
         }).collect();
-
         let conversion_graphs: HashMap<Uuid, ConversionGraph> = conversion_graphs_list.into_iter().map(|graph| {
             let uuid = generate_deterministic_uuid(&graph.graph);
             (uuid, graph)
         }).collect();
 
+        // ---------------------------------------------------------------------------------
+
+
         let duration = start.elapsed();
         println!("Completed loading ledger data. Took: {:?}", duration);
 
         Ok(Self {
+            storage: storage,
+
             accounts,
             transactions,
             systems,

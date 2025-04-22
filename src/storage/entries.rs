@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::{from_str, to_string};
 
-use crate::{index::BTreeIndex, read_entries_bin};
+use crate::index::BTreeIndex;
 use crate::model::Entry;
 use crate::storage::binary::write_entry_bin;
 
@@ -52,12 +52,4 @@ pub fn load_entries() -> std::io::Result<Vec<Entry>> {
 
         Ok(entry)
     }).collect()
-}
-
-pub fn load_entries_from_bin(bin_path: &Path) -> std::io::Result<Vec<Entry>> {
-    let start = std::time::Instant::now();
-    let result = read_entries_bin(bin_path);
-    let duration = start.elapsed();
-    println!("Loading entries took: {:?}", duration);
-    result
 }

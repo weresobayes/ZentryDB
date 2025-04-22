@@ -1,77 +1,479 @@
+use std::cell::RefCell;
 use std::fs::{OpenOptions, File};
-use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Read, Write};
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
 use std::path::Path;
+use std::collections::HashMap;
 
 use regex::Regex;
 use uuid::Uuid;
 use chrono::{TimeZone, Utc};
-use serde_json::{from_slice, to_vec, Value};
+use serde_json::to_vec;
 
 use crate::model::{Account, AccountType, Entry, Transaction, System, ConversionGraph};
 use crate::storage::layout::{BinaryLayout, BinaryField, LengthType, account_layout, system_layout, conversion_graph_layout};
 
-fn account_type_to_byte(account_type: &AccountType) -> u8 {
-    match account_type {
-        AccountType::Asset => 0,
-        AccountType::Liability => 1,
-        AccountType::Equity => 2,
-        AccountType::Revenue => 3,
-        AccountType::Expense => 4,
-    }
+use bimap::BiMap;
+use once_cell::sync::Lazy;
+
+static ACCOUNT_TYPE_BIMAP: Lazy<BiMap<u8, AccountType>> = Lazy::new(|| {
+    let mut map = BiMap::new();
+
+    map.insert(0u8, AccountType::Asset);
+    map.insert(1u8, AccountType::Liability);
+    map.insert(2u8, AccountType::Equity);
+    map.insert(3u8, AccountType::Revenue);
+    map.insert(4u8, AccountType::Expense);
+
+    map
+});
+
+fn account_type_from_u8(byte: u8) -> Option<AccountType> {
+    ACCOUNT_TYPE_BIMAP.get_by_left(&byte).cloned()
 }
 
-fn classify_graph_key(graph: &ConversionGraph) -> &'static str {
-    let active_conversion_key_pattern = Regex::new(r"^\s*\w+\s*(->|<-|<->)\s*\w+\s*$").unwrap();
-    let historical_conversion_key_pattern = Regex::new(
-        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+\d{2}:\d{2}\[\s*\w+\s*(->|<-|<->)\s*\w+\s*\]\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+\d{2}:\d{2}$"
-    ).unwrap();
-
-    if historical_conversion_key_pattern.is_match(&graph.graph) {
-        return "historical";
-    } else if active_conversion_key_pattern.is_match(&graph.graph) {
-        return "active";
-    }
-
-    "unknown"
-}
-    
-
-fn byte_to_account_type(byte: u8) -> std::io::Result<AccountType> {
-    match byte {
-        0 => Ok(AccountType::Asset),
-        1 => Ok(AccountType::Liability),
-        2 => Ok(AccountType::Equity),
-        3 => Ok(AccountType::Revenue),
-        4 => Ok(AccountType::Expense),
-        _ => Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "Invalid account type byte",
-        )),
-    }
+fn account_type_to_u8(account_type: &AccountType) -> Option<u8> {
+    ACCOUNT_TYPE_BIMAP.get_by_right(account_type).cloned()
 }
 
-fn write_length_prefixed_field(writer: &mut BufWriter<File>, bytes: &[u8], name: &str, length_type: LengthType) -> std::io::Result<()> {
-    let len = bytes.len();
-    
-    match length_type {
-        LengthType::U8 if len <= u8::MAX as usize => {
-            writer.write_all(&[len as u8])?;
+enum BinaryReadError {
+    DeadRecord,
+}
+
+impl From<BinaryReadError> for std::io::Error {
+    fn from(error: BinaryReadError) -> Self {
+        match error {
+            BinaryReadError::DeadRecord => std::io::Error::new(ErrorKind::Other, "Dead record"),
         }
-        LengthType::U16 if len <= u16::MAX as usize => {
-            writer.write_all(&(len as u16).to_le_bytes())?;
+    }
+}
+
+pub trait TombstoneReader {
+    fn is_tombstone_byte(&self, byte: u8) -> bool {
+        byte == 0x00
+    }
+
+    fn read_or_skip<T>(&self) -> std::io::Result<T>
+    where
+        T: FromBinary;
+
+    fn read<T>(&self) -> std::io::Result<Vec<T>>
+    where
+        T: FromBinary;
+}
+
+pub trait TombstoneWriter {
+    fn tombstone(&self, offset: u64) -> std::io::Result<()>;
+
+    fn write<T>(&self, item: T) -> std::io::Result<()>
+    where
+        T: ToBinary;
+}
+
+pub trait ToBinary {
+    fn to_binary(&self, writer: &mut BufWriter<File>, layout: &BinaryLayout) -> std::io::Result<()>;
+}
+
+pub trait FromBinary {
+    fn from_binary(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<Self>
+    where
+        Self: Sized;
+
+    fn skip_bytes(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<()>;
+}
+
+#[derive(Debug)]
+pub struct BinaryStorage {
+    readers: RefCell<HashMap<String, BufReader<File>>>,
+    layouts: HashMap<String, BinaryLayout>,
+}
+
+impl BinaryStorage {
+    pub fn new(readers: HashMap<String, BufReader<File>>, layouts: HashMap<String, BinaryLayout>) -> Self {
+        Self {
+            readers: RefCell::new(readers),
+            layouts,
+        }
+    }
+}
+
+// Helper for reading length-prefixed strings
+fn read_length_prefixed_string<R: std::io::Read>(reader: &mut R, length_type: &LengthType) -> std::io::Result<String> {
+    let len = match length_type {
+        LengthType::U8 => {
+            let mut buf = [0u8; 1];
+            reader.read_exact(&mut buf)?;
+            buf[0] as usize
+        }
+        LengthType::U16 => {
+            let mut buf = [0u8; 2];
+            reader.read_exact(&mut buf)?;
+            u16::from_le_bytes(buf) as usize
         }
         LengthType::U32 => {
-            writer.write_all(&(len as u32).to_le_bytes())?;
+            let mut buf = [0u8; 4];
+            reader.read_exact(&mut buf)?;
+            u32::from_le_bytes(buf) as usize
         }
-        _ => {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidData,
-                format!("{} is too long to encode", name),
-            ));
+    };
+    let mut str_buf = vec![0u8; len];
+    reader.read_exact(&mut str_buf)?;
+    Ok(String::from_utf8(str_buf).unwrap_or_default())
+}
+
+impl FromBinary for Account {
+    fn from_binary(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<Self> {
+        let mut id = Uuid::nil();
+        let mut name = String::new();
+        let mut account_type = AccountType::Asset;
+        let mut created_at = Utc.timestamp_opt(0, 0).unwrap();
+        let mut system_id = String::new();
+
+        for field in &layout.fields {
+            match field {
+                BinaryField::Uuid("id") => {
+                    let mut buf = [0u8; 16];
+                    reader.read_exact(&mut buf)?;
+                    id = Uuid::from_bytes(buf);
+                }
+                BinaryField::LengthPrefixed { length_type, name: "name" } => {
+                    name = read_length_prefixed_string(reader, length_type)?;
+                }
+                BinaryField::U8("account_type") => {
+                    let mut buf = [0u8; 1];
+                    reader.read_exact(&mut buf)?;
+                    account_type = account_type_from_u8(buf[0])
+                        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "Unknown account type"))?;
+                }
+                BinaryField::I64("created_at") => {
+                    let mut buf = [0u8; 8];
+                    reader.read_exact(&mut buf)?;
+                    let ts = i64::from_le_bytes(buf);
+                    created_at = Utc.timestamp_opt(ts, 0).unwrap();
+                }
+                BinaryField::LengthPrefixed { length_type, name: "system_id" } => {
+                    system_id = read_length_prefixed_string(reader, length_type)?;
+                }
+                _ => {}
+            }
         }
+        Ok(Account { id, name, account_type, created_at, system_id })
     }
 
-    writer.write_all(bytes)
+    fn skip_bytes(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        for field in &layout.fields {
+            match field {
+                BinaryField::Uuid(_) => { let mut buf = [0u8; 16]; reader.read_exact(&mut buf)?; }
+                BinaryField::U8(_) => { let mut buf = [0u8; 1]; reader.read_exact(&mut buf)?; }
+                BinaryField::I64(_) => { let mut buf = [0u8; 8]; reader.read_exact(&mut buf)?; }
+                BinaryField::LengthPrefixed { length_type, .. } => { let _ = read_length_prefixed_string(reader, length_type)?; }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FromBinary for Transaction {
+    fn from_binary(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<Self> {
+        let mut id = Uuid::nil();
+        let mut description = String::new();
+        let mut metadata: Option<serde_json::Value> = None;
+        let mut timestamp = Utc.timestamp_opt(0, 0).unwrap();
+
+        for field in &layout.fields {
+            match field {
+                BinaryField::Uuid("id") => {
+                    let mut buf = [0u8; 16];
+                    reader.read_exact(&mut buf)?;
+                    id = Uuid::from_bytes(buf);
+                }
+                BinaryField::LengthPrefixed { length_type, name: "description" } => {
+                    description = read_length_prefixed_string(reader, length_type)?;
+                }
+                BinaryField::LengthPrefixed { length_type, name: "metadata" } => {
+                    let json_str = read_length_prefixed_string(reader, length_type)?;
+                    metadata = if json_str.is_empty() { None } else { serde_json::from_str(&json_str).ok() };
+                }
+                BinaryField::I64("timestamp") => {
+                    let mut buf = [0u8; 8];
+                    reader.read_exact(&mut buf)?;
+                    let ts = i64::from_le_bytes(buf);
+                    timestamp = Utc.timestamp_opt(ts, 0).unwrap();
+                }
+                _ => {}
+            }
+        }
+        Ok(Transaction { id, description, timestamp, metadata })
+    }
+
+    fn skip_bytes(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        for field in &layout.fields {
+            match field {
+                BinaryField::Uuid(_) => { let mut buf = [0u8; 16]; reader.read_exact(&mut buf)?; }
+                BinaryField::I64(_) => { let mut buf = [0u8; 8]; reader.read_exact(&mut buf)?; }
+                BinaryField::LengthPrefixed { length_type, .. } => { let _ = read_length_prefixed_string(reader, length_type)?; }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FromBinary for Entry {
+    fn from_binary(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<Self> {
+        let mut id = Uuid::nil();
+        let mut transaction_id = Uuid::nil();
+        let mut account_id = Uuid::nil();
+        let mut amount = 0.0;
+
+        for field in &layout.fields {
+            match field {
+                BinaryField::Uuid("id") => {
+                    let mut buf = [0u8; 16];
+                    reader.read_exact(&mut buf)?;
+                    id = Uuid::from_bytes(buf);
+                }
+                BinaryField::Uuid("transaction_id") => {
+                    let mut buf = [0u8; 16];
+                    reader.read_exact(&mut buf)?;
+                    transaction_id = Uuid::from_bytes(buf);
+                }
+                BinaryField::Uuid("account_id") => {
+                    let mut buf = [0u8; 16];
+                    reader.read_exact(&mut buf)?;
+                    account_id = Uuid::from_bytes(buf);
+                }
+                BinaryField::F64("amount") => {
+                    let mut buf = [0u8; 8];
+                    reader.read_exact(&mut buf)?;
+                    amount = f64::from_le_bytes(buf);
+                }
+                _ => {}
+            }
+        }
+        Ok(Entry { id, transaction_id, account_id, amount })
+    }
+
+    fn skip_bytes(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        for field in &layout.fields {
+            match field {
+                BinaryField::Uuid(_) => { let mut buf = [0u8; 16]; reader.read_exact(&mut buf)?; }
+                BinaryField::F64(_) => { let mut buf = [0u8; 8]; reader.read_exact(&mut buf)?; }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FromBinary for System {
+    fn from_binary(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<Self> {
+        let mut id = String::new();
+        let mut description = String::new();
+
+        for field in &layout.fields {
+            match field {
+                BinaryField::LengthPrefixed { length_type, name: "system_id" } => {
+                    id = read_length_prefixed_string(reader, length_type)?;
+                }
+                BinaryField::LengthPrefixed { length_type, name: "description" } => {
+                    description = read_length_prefixed_string(reader, length_type)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(System { id, description })
+    }
+
+    fn skip_bytes(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        for field in &layout.fields {
+            match field {
+                BinaryField::LengthPrefixed { length_type, .. } => { let _ = read_length_prefixed_string(reader, length_type)?; }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FromBinary for ConversionGraph {
+    fn from_binary(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<Self> {
+        use std::io::Read;
+
+        let mut graph = String::new();
+        let mut rate = 0.0;
+        let mut rate_since = Utc::now();
+
+        for field in &layout.fields {
+            match field {
+                BinaryField::LengthPrefixed { length_type, name: "graph" } => {
+                    let len = match length_type {
+                        LengthType::U8 => {
+                            let mut len_buf = [0u8; 1];
+                            reader.read_exact(&mut len_buf)?;
+                            len_buf[0] as usize
+                        }
+                        LengthType::U16 => {
+                            let mut len_buf = [0u8; 2];
+                            reader.read_exact(&mut len_buf)?;
+                            u16::from_le_bytes(len_buf) as usize
+                        }
+                        LengthType::U32 => {
+                            let mut len_buf = [0u8; 4];
+                            reader.read_exact(&mut len_buf)?;
+                            u32::from_le_bytes(len_buf) as usize
+                        }
+                    };
+
+                    let mut tag_buf = [0u8; 1];
+                    reader.read_exact(&mut tag_buf)?;
+                    let tag = tag_buf[0];
+
+                    if tag != b'C' {
+                        let skip_bytes = len + 8 + 8 - 1;
+                        let mut skip_buf = vec![0u8; skip_bytes];
+                        reader.read_exact(&mut skip_buf)?;
+
+                        return Err(std::io::Error::new(
+                            ErrorKind::InvalidData,
+                            "Not converting historical conversion graph, will come in improvement later",
+                        ));
+                    }
+
+                    // Read the rest of the graph string (already read 1 byte for tag)
+                    let mut graph_buf = vec![0u8; len - 1];
+                    reader.read_exact(&mut graph_buf)?;
+                    let graph_with_key = String::from_utf8([vec![tag], graph_buf].concat()).unwrap_or_default();
+
+                    // Extract the value inside C[...]
+                    let re = Regex::new(r"C\[(.*?)\]").unwrap();
+                    if let Some(caps) = re.captures(&graph_with_key) {
+                        if let Some(g) = caps.get(1) {
+                            graph = g.as_str().to_string();
+                        }
+                    }
+                }
+                BinaryField::F64("rate") => {
+                    let mut buf = [0u8; 8];
+                    reader.read_exact(&mut buf)?;
+                    rate = f64::from_le_bytes(buf);
+                }
+                BinaryField::I64("rate_since") => {
+                    let mut buf = [0u8; 8];
+                    reader.read_exact(&mut buf)?;
+                    let timestamp = i64::from_le_bytes(buf);
+                    rate_since = chrono::Utc.timestamp_opt(timestamp, 0).unwrap();
+                }
+                _ => {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "Invalid field for ConversionGraph",
+                    ));
+                }
+            }
+        }
+
+        Ok(ConversionGraph { graph, rate, rate_since })
+    }
+
+    fn skip_bytes(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        for field in &layout.fields {
+            match field {
+                BinaryField::LengthPrefixed { length_type, .. } => {
+                    let len = match length_type {
+                        LengthType::U8 => {
+                            let mut len_buf = [0u8; 1];
+                            reader.read_exact(&mut len_buf)?;
+                            len_buf[0] as usize
+                        }
+                        LengthType::U16 => {
+                            let mut len_buf = [0u8; 2];
+                            reader.read_exact(&mut len_buf)?;
+                            u16::from_le_bytes(len_buf) as usize
+                        }
+                        LengthType::U32 => {
+                            let mut len_buf = [0u8; 4];
+                            reader.read_exact(&mut len_buf)?;
+                            u32::from_le_bytes(len_buf) as usize
+                        }
+                    };
+                    // Skip the actual field data
+                    let mut skip_buf = vec![0u8; len];
+                    reader.read_exact(&mut skip_buf)?;
+                }
+                BinaryField::F64 { .. } => {
+                    let mut skip_buf = [0u8; 8];
+                    reader.read_exact(&mut skip_buf)?;
+                }
+                BinaryField::I64 { .. } => {
+                    let mut skip_buf = [0u8; 8];
+                    reader.read_exact(&mut skip_buf)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl TombstoneReader for BinaryStorage {
+    fn read<T>(&self) -> std::io::Result<Vec<T>>
+    where
+        T: FromBinary,
+    {
+        let mut items = Vec::new();
+
+        loop {
+            match self.read_or_skip::<T>() {
+                Ok(i) => items.push(i),
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(e) => {
+                    if e.to_string().contains("Dead record") {
+                        continue;
+                    }
+
+                    if e.to_string().contains("Not enough data") {
+                        continue;
+                    }
+
+                    return Err(e);
+                }
+            }
+        }
+
+        Ok(items)
+    }
+
+    fn read_or_skip<T>(&self) -> std::io::Result<T>
+    where
+        T: FromBinary,
+    {
+        let type_key = match std::any::type_name::<T>() {
+            t if t.contains("Account") => "accounts",
+            t if t.contains("Transaction") => "transactions",
+            t if t.contains("Entry") => "entries",
+            t if t.contains("System") => "systems",
+            t if t.contains("ConversionGraph") => "conversion_graphs",
+            _ => return Err(std::io::Error::new(ErrorKind::Other, "Unsupported type"))
+        };
+
+        let mut readers = self.readers.borrow_mut();
+        let reader = readers.get_mut(type_key)
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No reader found for type"))?;
+
+        let layout = self.layouts.get(type_key)
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No layout found for type"))?;
+
+        let mut tombstone_buf = [0u8; 1];
+        reader.read_exact(&mut tombstone_buf)?;
+
+        if self.is_tombstone_byte(tombstone_buf[0]) {
+            T::skip_bytes(reader, layout)?;
+            return Err(BinaryReadError::DeadRecord.into())
+        }
+
+        T::from_binary(reader, layout)
+    }
 }
 
 pub fn write_account_bin(account: &Account, path: &Path) -> std::io::Result<()> {
@@ -89,7 +491,7 @@ pub fn write_account_bin(account: &Account, path: &Path) -> std::io::Result<()> 
                 writer.write_all(account.id.as_bytes())?;
             }
             BinaryField::U8("account_type") => {
-                writer.write_all(&[account_type_to_byte(&account.account_type)])?;
+                writer.write_all(&[account_type_to_u8(&account.account_type).unwrap()])?;
             }
             BinaryField::I64("created_at") => {
                 let ts = account.created_at.timestamp();
@@ -274,245 +676,6 @@ pub fn write_conversion_graph_bin(graph: &ConversionGraph, path: &Path) -> std::
     Ok(())
 }
 
-pub fn read_accounts_bin(path: &Path) -> std::io::Result<Vec<Account>> {
-    let mut file = BufReader::new(File::open(path)?);
-    let mut accounts = Vec::new();
-
-    loop {
-        let mut id_bytes = [0u8; 16];
-        if file.read_exact(&mut id_bytes).is_err() {
-            break;
-        }
-
-        let mut len_buf = [0u8; 1];
-        file.read_exact(&mut len_buf)?;
-        let name_len = len_buf[0] as usize;
-
-        let mut name_buf = vec![0u8; name_len];
-        file.read_exact(&mut name_buf)?;
-        let name = String::from_utf8(name_buf).unwrap_or_default();
-
-        let mut type_buf = [0u8; 1];
-        file.read_exact(&mut type_buf)?;
-        let account_type = byte_to_account_type(type_buf[0])?;
-
-        let mut timestamp_buf = [0u8; 8];
-        file.read_exact(&mut timestamp_buf)?;
-        let timestamp = i64::from_le_bytes(timestamp_buf);
-        let created_at = Utc.timestamp_opt(timestamp, 0).unwrap();
-
-        let mut system_id_len_buf = [0u8; 1];
-        file.read_exact(&mut system_id_len_buf)?;
-        let system_id_len = system_id_len_buf[0] as usize;
-
-        let mut system_id_buf = vec![0u8; system_id_len];
-        file.read_exact(&mut system_id_buf)?;
-        let system_id = String::from_utf8(system_id_buf).unwrap_or_default();
-
-        accounts.push(Account {
-            id: Uuid::from_bytes(id_bytes),
-            name,
-            account_type,
-            created_at,
-            system_id,
-        });
-    }
-
-    Ok(accounts)
-}
-
-fn read_metadata<R: Read>(reader: &mut R) -> std::io::Result<Option<Value>> {
-    let mut tag = [0u8; 1];
-    reader.read_exact(&mut tag)?;
-
-    if tag[0] == 0 {
-        return Ok(None)
-    } else {
-        let mut len_buf = [0u8; 4];
-        reader.read_exact(&mut len_buf)?;
-        let len = u32::from_le_bytes(len_buf);
-        
-        let mut bytes = vec![0u8; len as usize];
-        reader.read_exact(&mut bytes)?;
-
-        let value: Value = from_slice(&bytes)?;
-        Ok(Some(value))
-    }
-}
-
-pub fn read_transactions_bin(path: &Path) -> std::io::Result<Vec<Transaction>> {
-    let mut file = BufReader::new(File::open(path)?);
-    let mut transactions = Vec::new();
-
-    loop {
-        let mut id_bytes = [0u8; 16];
-        if (file.read_exact(&mut id_bytes)).is_err() {
-            break;
-        }
-
-        let mut len_buf = [0u8; 1];
-        if (file.read_exact(&mut len_buf)).is_err() {
-            break;
-        }
-        let description_len = len_buf[0] as usize;
-
-        let mut description_buf = vec![0u8; description_len];
-        if (file.read_exact(&mut description_buf)).is_err() {
-            break;
-        }
-        let description = String::from_utf8(description_buf).unwrap_or_default();
-
-        let metadata = read_metadata(&mut file)?;
-
-        let mut timestamp_buf = [0u8; 8];
-        if (file.read_exact(&mut timestamp_buf)).is_err() {
-            break;
-        }
-        let _timestamp = i64::from_le_bytes(timestamp_buf);
-        let timestamp = Utc.timestamp_opt(_timestamp, 0).unwrap();
-
-        transactions.push(Transaction {
-            id: Uuid::from_bytes(id_bytes),
-            description,
-            metadata,
-            timestamp,
-        });
-    }
-
-    Ok(transactions)
-}
-
-pub fn read_entries_bin(path: &Path) -> std::io::Result<Vec<Entry>> {
-    let mut file = BufReader::new(File::open(path)?);
-    let mut entries = Vec::new();
-
-    loop {
-        let mut id_bytes = [0u8; 16];
-        if (file.read_exact(&mut id_bytes)).is_err() {
-            break;
-        }
-
-        let mut transaction_id_bytes = [0u8; 16];
-        if (file.read_exact(&mut transaction_id_bytes)).is_err() {
-            break;
-        }
-
-        let mut account_id_bytes = [0u8; 16];
-        if (file.read_exact(&mut account_id_bytes)).is_err() {
-            break;
-        }
-
-        let mut amount_bytes = [0u8; 8];
-        if (file.read_exact(&mut amount_bytes)).is_err() {
-            break;
-        }
-        let amount = f64::from_le_bytes(amount_bytes);
-
-        entries.push(Entry {
-            id: Uuid::from_bytes(id_bytes),
-            transaction_id: Uuid::from_bytes(transaction_id_bytes),
-            account_id: Uuid::from_bytes(account_id_bytes),
-            amount,
-        });
-    }
-
-    Ok(entries)
-}
-
-pub fn read_systems_bin(path: &Path) -> std::io::Result<Vec<System>> {
-    let mut file = BufReader::new(File::open(path)?);
-    let mut systems = Vec::new();
-
-    loop {
-        // Read ID
-        let mut id_len_buf = [0u8; 1];
-        if file.read_exact(&mut id_len_buf).is_err() {
-            break;
-        }
-        let id_len = id_len_buf[0] as usize;
-
-        let mut id_buf = vec![0u8; id_len];
-        file.read_exact(&mut id_buf)?;
-        let id = String::from_utf8(id_buf).unwrap_or_default();
-
-        // Read description
-        let mut desc_len_buf = [0u8; 1];
-        file.read_exact(&mut desc_len_buf)?;
-        let desc_len = desc_len_buf[0] as usize;
-
-        let mut desc_buf = vec![0u8; desc_len];
-        file.read_exact(&mut desc_buf)?;
-        let description = String::from_utf8(desc_buf).unwrap_or_default();
-
-        systems.push(System {
-            id,
-            description,
-        });
-    }
-
-    Ok(systems)
-}
-
-pub fn read_conversion_graphs_bin(path: &Path) -> std::io::Result<Vec<ConversionGraph>> {
-    let mut file = BufReader::new(File::open(path)?);
-    let mut graphs = Vec::new();
-
-    loop {
-        // Read graph string
-        let mut graph_len_buf = [0u8; 1];
-        if file.read_exact(&mut graph_len_buf).is_err() {
-            break;
-        }
-        let graph_len = graph_len_buf[0] as usize;
-
-        let buf = file.fill_buf()?;
-        if buf.len() < 1 {
-            break;
-        }
-
-        // if it's not a current/active conversion graph, skip
-        let tag = buf[0];
-        if tag != b'C' {
-            let skip_by = graph_len + 8 + 8;
-            file.consume(skip_by);
-            continue;
-        }
-
-        let mut graph_buf = vec![0u8; graph_len];
-        file.read_exact(&mut graph_buf)?;
-        let graph_with_key = String::from_utf8(graph_buf).unwrap_or_default();
-
-        let re = Regex::new(r"C\[(.*?)\]").unwrap();
-
-        let mut graph = String::new();
-
-        if let Some(caps) = re.captures(&graph_with_key) {
-            if let Some(g) = caps.get(1) {
-                graph = g.as_str().to_string();
-            }
-        }
-
-        // Read rate
-        let mut rate_buf = [0u8; 8];
-        file.read_exact(&mut rate_buf)?;
-        let rate = f64::from_le_bytes(rate_buf);
-
-        // Read timestamp
-        let mut timestamp_buf = [0u8; 8];
-        file.read_exact(&mut timestamp_buf)?;
-        let timestamp = i64::from_le_bytes(timestamp_buf);
-        let rate_since = Utc.timestamp_opt(timestamp, 0).unwrap();
-
-        graphs.push(ConversionGraph {
-            graph,
-            rate,
-            rate_since,
-        });
-    }
-
-    Ok(graphs)
-}
-
 pub fn compute_object_size(layout: &BinaryLayout, data: &[u8], offset: usize) -> std::io::Result<usize> {
     let mut cursor = offset;
     let mut total_size = 0;
@@ -566,4 +729,43 @@ pub fn compute_object_size(layout: &BinaryLayout, data: &[u8], offset: usize) ->
     }
 
     Ok(total_size)
+}
+
+fn classify_graph_key(graph: &ConversionGraph) -> &'static str {
+    let active_conversion_key_pattern = Regex::new(r"^\s*\w+\s*(->|<-|<->)\s*\w+\s*$").unwrap();
+    let historical_conversion_key_pattern = Regex::new(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+\d{2}:\d{2}\[\s*\w+\s*(->|<-|<->)\s*\w+\s*\]\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+\d{2}:\d{2}$"
+    ).unwrap();
+
+    if historical_conversion_key_pattern.is_match(&graph.graph) {
+        return "historical";
+    } else if active_conversion_key_pattern.is_match(&graph.graph) {
+        return "active";
+    }
+
+    "unknown"
+}
+
+fn write_length_prefixed_field(writer: &mut BufWriter<File>, bytes: &[u8], name: &str, length_type: LengthType) -> std::io::Result<()> {
+    let len = bytes.len();
+    
+    match length_type {
+        LengthType::U8 if len <= u8::MAX as usize => {
+            writer.write_all(&[len as u8])?;
+        }
+        LengthType::U16 if len <= u16::MAX as usize => {
+            writer.write_all(&(len as u16).to_le_bytes())?;
+        }
+        LengthType::U32 => {
+            writer.write_all(&(len as u32).to_le_bytes())?;
+        }
+        _ => {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("{} is too long to encode", name),
+            ));
+        }
+    }
+
+    writer.write_all(bytes)
 }

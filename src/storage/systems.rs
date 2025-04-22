@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::{from_str, to_string};
 
-use crate::{index::BTreeIndex, read_systems_bin};
+use crate::index::BTreeIndex;
 use crate::model::System;
 use crate::storage::binary::write_system_bin;
 use crate::util::uuid::generate_deterministic_uuid;
@@ -55,12 +55,4 @@ pub fn load_systems() -> std::io::Result<Vec<System>> {
 
         Ok(system)
     }).collect()
-}
-
-pub fn load_systems_from_bin(bin_path: &Path) -> std::io::Result<Vec<System>> {
-    let start = std::time::Instant::now();
-    let result = read_systems_bin(bin_path);
-    let duration = start.elapsed();
-    println!("Loading systems took: {:?}", duration);
-    result
 }

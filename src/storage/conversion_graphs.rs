@@ -2,7 +2,7 @@ use std::{fs::OpenOptions, io::{BufRead, BufReader, BufWriter, Read, Seek, SeekF
 
 use serde_json::{from_str, to_string};
 
-use crate::{index::BTreeIndex, read_conversion_graphs_bin};
+use crate::index::BTreeIndex;
 use crate::model::ConversionGraph;
 use crate::storage::binary::write_conversion_graph_bin;
 use crate::util::uuid::generate_deterministic_uuid;
@@ -74,12 +74,3 @@ pub fn load_conversion_graphs() -> std::io::Result<Vec<ConversionGraph>> {
         Ok(graph)
     }).collect()
 }
-
-pub fn load_conversion_graphs_from_bin(bin_path: &Path) -> std::io::Result<Vec<ConversionGraph>> {
-    let start = std::time::Instant::now();
-    let result = read_conversion_graphs_bin(bin_path);
-    let duration = start.elapsed();
-    println!("Loading conversion graphs took: {:?}", duration);
-    result
-}
-    

@@ -33,7 +33,7 @@ pub struct ConversionGraph {
     pub rate_since: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum AccountType {
     Asset,
     Liability,
