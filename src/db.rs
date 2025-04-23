@@ -1,20 +1,19 @@
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter};
 use std::path::Path;
-use uuid::Uuid;
-use once_cell::sync::Lazy;
 
+use chrono::{DateTime, Utc};
+use once_cell::sync::Lazy;
+use uuid::Uuid;
+
+use crate::{
+    account_layout, conversion_graph_layout, entry_layout, system_layout, transaction_layout,
+    BinaryStorage, TombstoneReader, TombstoneWriter
+};
+use crate::util::uuid::generate_deterministic_uuid;
 use crate::index::BTreeIndex;
 use crate::model::{Transaction, Entry, Account, System, ConversionGraph};
-use crate::storage::accounts::write_account_bin_and_index;
-use crate::storage::transactions::write_transaction_bin_and_index;
-use crate::storage::entries::write_entry_bin_and_index;
-use crate::storage::systems::write_system_bin_and_index;
-use crate::storage::conversion_graphs::{write_conversion_graph_bin_and_index, zero_conversion_graph_at_offset};
-use crate::util::uuid::generate_deterministic_uuid;
-use crate::{account_layout, conversion_graph_layout, entry_layout, system_layout, transaction_layout, BinaryStorage, TombstoneReader};
-use chrono::{DateTime, Utc};
 
 static ACCOUNT_BIN_PATH: Lazy<&'static Path> = Lazy::new(|| Path::new("data/accounts.bin"));
 static TRANSACTION_BIN_PATH: Lazy<&'static Path> = Lazy::new(|| Path::new("data/transactions.bin"));
@@ -52,6 +51,7 @@ impl Ledger {
         // ---------------------------------------------------------------------------------
 
         let mut readers = HashMap::new();
+        let mut writers = HashMap::new();
         let mut layouts = HashMap::new();
 
         readers.insert("accounts".to_string(), BufReader::new(File::open(*ACCOUNT_BIN_PATH).unwrap()));
@@ -60,13 +60,19 @@ impl Ledger {
         readers.insert("systems".to_string(), BufReader::new(File::open(*SYSTEM_BIN_PATH).unwrap()));
         readers.insert("conversion_graphs".to_string(), BufReader::new(File::open(*CONVERSION_GRAPH_BIN_PATH).unwrap()));
 
+        writers.insert("accounts".to_string(), BufWriter::new(OpenOptions::new().append(true).create(true).open(*ACCOUNT_BIN_PATH)?));
+        writers.insert("transactions".to_string(), BufWriter::new(OpenOptions::new().append(true).create(true).open(*TRANSACTION_BIN_PATH)?));
+        writers.insert("entries".to_string(), BufWriter::new(OpenOptions::new().append(true).create(true).open(*ENTRY_BIN_PATH)?));
+        writers.insert("systems".to_string(), BufWriter::new(OpenOptions::new().append(true).create(true).open(*SYSTEM_BIN_PATH)?));
+        writers.insert("conversion_graphs".to_string(), BufWriter::new(OpenOptions::new().append(true).create(true).open(*CONVERSION_GRAPH_BIN_PATH)?));
+
         layouts.insert("accounts".to_string(), account_layout());
         layouts.insert("transactions".to_string(), transaction_layout());
         layouts.insert("entries".to_string(), entry_layout());
         layouts.insert("systems".to_string(), system_layout());
         layouts.insert("conversion_graphs".to_string(), conversion_graph_layout());
 
-        let storage = BinaryStorage::new(readers, layouts);
+        let storage = BinaryStorage::new(readers, writers, layouts);
 
         let accounts_list = storage.read::<Account>()?;
         let transactions_list = storage.read::<Transaction>()?;
@@ -108,16 +114,32 @@ impl Ledger {
         })
     }
 
+    pub fn persist_indexes(&self) -> std::io::Result<()> {
+        self.account_index.persist(*ACCOUNT_IDX_PATH)?;
+        self.transaction_index.persist(*TRANSACTION_IDX_PATH)?;
+        self.entry_index.persist(*ENTRY_IDX_PATH)?;
+        self.system_index.persist(*SYSTEM_IDX_PATH)?;
+        self.conversion_graph_index.persist(*CONVERSION_GRAPH_IDX_PATH)?;
+        Ok(())
+    }
+
     pub fn create_account(&mut self, account: Account) -> std::io::Result<()> {
-        write_account_bin_and_index(&account, *ACCOUNT_BIN_PATH, &mut self.account_index)?;
-        self.accounts.insert(account.id, account);
+        let (offset, account) = self.storage.write(account)?;
+
+        let uuid = generate_deterministic_uuid(&account.id);
+        self.accounts.insert(uuid, account);
+        self.account_index.insert(uuid, offset);
+
         Ok(())
     }
 
     pub fn create_system(&mut self, system: System) -> std::io::Result<()> {
-        write_system_bin_and_index(&system, *SYSTEM_BIN_PATH, &mut self.system_index)?;
+        let (offset, system) = self.storage.write(system)?;
+
         let uuid = generate_deterministic_uuid(&system.id);
         self.systems.insert(uuid, system);
+        self.system_index.insert(uuid, offset);
+
         Ok(())
     }
 
@@ -139,14 +161,15 @@ impl Ledger {
         // Get the old graph's offset from index and zero out old record if it exists
         let old_uuid = generate_deterministic_uuid(&graph.graph);
         if let Some(offset) = self.conversion_graph_index.get(&old_uuid) {
-            zero_conversion_graph_at_offset(*CONVERSION_GRAPH_BIN_PATH, offset)?;
+            self.storage.tombstone(graph.clone(), offset)?;
         }
 
         // Append historical version to storage
-        write_conversion_graph_bin_and_index(&historical_graph, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+        let (offset, historical_graph) = self.storage.write(historical_graph)?;
         
         // Update in-memory map - insert or update
         let historical_uuid = generate_deterministic_uuid(&historical_graph.graph);
+        self.conversion_graph_index.insert(historical_uuid, offset);
         self.conversion_graphs.insert(historical_uuid, historical_graph);
         
         Ok(())
@@ -202,8 +225,9 @@ impl Ledger {
                 graph.graph = graph_key;
                 graph.rate_since = now;
                 let uuid = generate_deterministic_uuid(&graph.graph);
-                write_conversion_graph_bin_and_index(&graph, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+                let (offset, graph) = self.storage.write(graph)?;
                 self.conversion_graphs.entry(uuid).and_modify(|e| *e = graph.clone()).or_insert(graph);
+                self.conversion_graph_index.insert(uuid, offset);
             }
             "<-" => {
                 // Check if conversion already exists
@@ -219,8 +243,9 @@ impl Ledger {
                 graph.graph = graph_key;
                 graph.rate_since = now;
                 let uuid = generate_deterministic_uuid(&graph.graph);
-                write_conversion_graph_bin_and_index(&graph, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+                let (offset, graph) = self.storage.write(graph)?;
                 self.conversion_graphs.entry(uuid).and_modify(|e| *e = graph.clone()).or_insert(graph);
+                self.conversion_graph_index.insert(uuid, offset);
             }
             "<->" => {
                 // Check and archive both directions if they exist
@@ -245,8 +270,9 @@ impl Ledger {
                     rate_since: graph.rate_since,
                 };
                 let uuid = generate_deterministic_uuid(&forward.graph);
-                write_conversion_graph_bin_and_index(&forward, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+                let (offset, forward) = self.storage.write(forward)?;
                 self.conversion_graphs.entry(uuid).and_modify(|e| *e = forward.clone()).or_insert(forward);
+                self.conversion_graph_index.insert(uuid, offset);
 
                 let reverse = ConversionGraph {
                     graph: reverse_key,
@@ -254,8 +280,9 @@ impl Ledger {
                     rate_since: graph.rate_since,
                 };
                 let uuid = generate_deterministic_uuid(&reverse.graph);
-                write_conversion_graph_bin_and_index(&reverse, *CONVERSION_GRAPH_BIN_PATH, &mut self.conversion_graph_index)?;
+                let (offset, reverse) = self.storage.write(reverse)?;
                 self.conversion_graphs.entry(uuid).and_modify(|e| *e = reverse.clone()).or_insert(reverse);
+                self.conversion_graph_index.insert(uuid, offset);
             }
             _ => {
                 return Err(std::io::Error::new(
@@ -277,24 +304,27 @@ impl Ledger {
             ));
         }
 
-        let mut system_entries: HashMap<String, Vec<&Entry>> = HashMap::new();
+        let mut system_entries: HashMap<Uuid, Vec<&Entry>> = HashMap::new();
         for entry in entries.iter() {
-            let account = self.accounts.get(&entry.account_id).ok_or_else(|| {
+            let acc_uuid = generate_deterministic_uuid(&entry.account_id);
+
+            let account = self.accounts.get(&acc_uuid).ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("Account not found: {}", entry.account_id),
                 )
             })?;
+
+            let uuid = generate_deterministic_uuid(&account.id);
             
             system_entries
-                .entry(account.system_id.clone())
+                .entry(uuid)
                 .or_default()
                 .push(entry);
         }
 
         for (system_id, entries) in system_entries.iter() {
-            let system_uuid = generate_deterministic_uuid(system_id);
-            if !self.systems.contains_key(&system_uuid) {
+            if !self.systems.contains_key(&system_id) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("System not found: {}", system_id),
@@ -311,11 +341,14 @@ impl Ledger {
         }
 
         for entry in entries.iter() {
-            write_entry_bin_and_index(entry, *ENTRY_BIN_PATH, &mut self.entry_index)?;
-            self.entries.push(entry.clone());
+            let (offset, entry) = self.storage.write(entry.clone())?;
+
+            self.entry_index.insert(generate_deterministic_uuid(&entry.id), offset);
+            self.entries.push(entry);
         }
 
-        write_transaction_bin_and_index(&tx, *TRANSACTION_BIN_PATH, &mut self.transaction_index)?;
+        let (offset, tx) = self.storage.write(tx)?;
+        self.transaction_index.insert(generate_deterministic_uuid(&tx.id), offset);
         self.transactions.insert(tx.id, tx);
         Ok(())
     }

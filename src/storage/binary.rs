@@ -1,16 +1,15 @@
+use std::borrow::Borrow;
 use std::cell::RefCell;
-use std::fs::{OpenOptions, File};
-use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::collections::HashMap;
 
 use regex::Regex;
 use uuid::Uuid;
 use chrono::{TimeZone, Utc};
-use serde_json::to_vec;
 
 use crate::model::{Account, AccountType, Entry, Transaction, System, ConversionGraph};
-use crate::storage::layout::{BinaryLayout, BinaryField, LengthType, account_layout, system_layout, conversion_graph_layout};
+use crate::storage::layout::{BinaryLayout, BinaryField, LengthType};
 
 use bimap::BiMap;
 use once_cell::sync::Lazy;
@@ -39,10 +38,22 @@ enum BinaryReadError {
     DeadRecord,
 }
 
+enum BinaryWriteError {
+    TryingToTombstoneWrongRecord,
+}
+
 impl From<BinaryReadError> for std::io::Error {
     fn from(error: BinaryReadError) -> Self {
         match error {
             BinaryReadError::DeadRecord => std::io::Error::new(ErrorKind::Other, "Dead record"),
+        }
+    }
+}
+
+impl From<BinaryWriteError> for std::io::Error {
+    fn from(error: BinaryWriteError) -> Self {
+        match error {
+            BinaryWriteError::TryingToTombstoneWrongRecord => std::io::Error::new(ErrorKind::Other, "Trying to tombstone wrong record"),
         }
     }
 }
@@ -62,9 +73,11 @@ pub trait TombstoneReader {
 }
 
 pub trait TombstoneWriter {
-    fn tombstone(&self, offset: u64) -> std::io::Result<()>;
+    fn tombstone<T>(&self, item: T, offset: u64) -> std::io::Result<()>
+    where
+        T: FromBinary + PartialEq;
 
-    fn write<T>(&self, item: T) -> std::io::Result<()>
+    fn write<T>(&self, item: T) -> std::io::Result<(u64, T)>
     where
         T: ToBinary;
 }
@@ -84,40 +97,50 @@ pub trait FromBinary {
 #[derive(Debug)]
 pub struct BinaryStorage {
     readers: RefCell<HashMap<String, BufReader<File>>>,
+    writers: RefCell<HashMap<String, BufWriter<File>>>,
     layouts: HashMap<String, BinaryLayout>,
 }
 
 impl BinaryStorage {
-    pub fn new(readers: HashMap<String, BufReader<File>>, layouts: HashMap<String, BinaryLayout>) -> Self {
+    pub fn new(readers: HashMap<String, BufReader<File>>, writers: HashMap<String, BufWriter<File>>, layouts: HashMap<String, BinaryLayout>) -> Self {
         Self {
             readers: RefCell::new(readers),
+            writers: RefCell::new(writers),
             layouts,
         }
     }
-}
 
-// Helper for reading length-prefixed strings
-fn read_length_prefixed_string<R: std::io::Read>(reader: &mut R, length_type: &LengthType) -> std::io::Result<String> {
-    let len = match length_type {
-        LengthType::U8 => {
-            let mut buf = [0u8; 1];
-            reader.read_exact(&mut buf)?;
-            buf[0] as usize
+    pub fn read_single<T>(&self, offset: u64) -> std::io::Result<T>
+    where
+        T: FromBinary,
+    {
+        let type_key = match std::any::type_name::<T>() {
+            t if t.contains("Account") => "accounts",
+            t if t.contains("Transaction") => "transactions",
+            t if t.contains("Entry") => "entries",
+            t if t.contains("System") => "systems",
+            t if t.contains("ConversionGraph") => "conversion_graphs",
+            _ => return Err(std::io::Error::new(ErrorKind::Other, "Unsupported type"))
+        };
+
+        let mut readers = self.readers.borrow_mut();
+        let reader = readers.get_mut(type_key)
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No reader found for type"))?;
+
+        let layout = self.layouts.get(type_key)
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No layout found for type"))?;
+
+        reader.seek(SeekFrom::Start(offset))?;
+
+        let mut tombstone_buf = [0u8; 1];
+        reader.read_exact(&mut tombstone_buf)?;
+
+        if self.is_tombstone_byte(tombstone_buf[0]) {
+            return Err(BinaryReadError::DeadRecord.into())
         }
-        LengthType::U16 => {
-            let mut buf = [0u8; 2];
-            reader.read_exact(&mut buf)?;
-            u16::from_le_bytes(buf) as usize
-        }
-        LengthType::U32 => {
-            let mut buf = [0u8; 4];
-            reader.read_exact(&mut buf)?;
-            u32::from_le_bytes(buf) as usize
-        }
-    };
-    let mut str_buf = vec![0u8; len];
-    reader.read_exact(&mut str_buf)?;
-    Ok(String::from_utf8(str_buf).unwrap_or_default())
+
+        T::from_binary(reader, layout)
+    }
 }
 
 impl FromBinary for Account {
@@ -476,204 +499,261 @@ impl TombstoneReader for BinaryStorage {
     }
 }
 
-pub fn write_account_bin(account: &Account, path: &Path) -> std::io::Result<()> {
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
+impl TombstoneWriter for BinaryStorage {
+    fn tombstone<T>(&self, item: T, offset: u64) -> std::io::Result<()>
+    where
+        T: FromBinary + PartialEq
+    {
+        let type_key = match std::any::type_name::<T>() {
+            t if t.contains("Account") => "accounts",
+            t if t.contains("Transaction") => "transactions",
+            t if t.contains("Entry") => "entries",
+            t if t.contains("System") => "systems",
+            t if t.contains("ConversionGraph") => "conversion_graphs",
+            _ => return Err(std::io::Error::new(ErrorKind::Other, "Unsupported type"))
+        };
 
-    let mut writer = BufWriter::new(file);
-    let layout = account_layout();
+        let item_from_binary = self.read_single::<T>(offset)?;
 
-    for field in layout.fields {
-        match field {
-            BinaryField::Uuid("id") => {
-                writer.write_all(account.id.as_bytes())?;
-            }
-            BinaryField::U8("account_type") => {
-                writer.write_all(&[account_type_to_u8(&account.account_type).unwrap()])?;
-            }
-            BinaryField::I64("created_at") => {
-                let ts = account.created_at.timestamp();
-                writer.write_all(&ts.to_le_bytes())?;
-            }
-            BinaryField::LengthPrefixed { name, length_type } => {
-                let bytes = match name {
-                    "name" => account.name.as_bytes(),
-                    "system_id" => account.system_id.as_bytes(),
-                    _ => {
-                        return Err(std::io::Error::new(
-                            ErrorKind::InvalidInput,
-                            format!("Unknown field in layout: {}", name),
-                        ));
-                    }
-                };
+        if item_from_binary != item {
+            return Err(BinaryWriteError::TryingToTombstoneWrongRecord.into())
+        }
 
-                write_length_prefixed_field(&mut writer, bytes, name, length_type)?;
-            }
-            other => {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Unexpected binary field in Account layout: {:?}", other),
-                ));
+        let mut tombstone_buf = [0u8; 1];
+        tombstone_buf[0] = 0;
+
+        let mut writers = self.writers.borrow_mut();
+        let writer = writers.get_mut(type_key)
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No writer found for type"))?;
+
+        writer.seek(SeekFrom::Start(offset))?;
+        writer.write(&tombstone_buf)?;
+        writer.seek(SeekFrom::End(0))?;
+
+        Ok(())
+    }
+
+    fn write<T>(&self, item: T) -> std::io::Result<(u64, T)>
+    where
+        T: ToBinary
+    {
+        let type_key = match std::any::type_name::<T>() {
+            t if t.contains("Account") => "accounts",
+            t if t.contains("Transaction") => "transactions",
+            t if t.contains("Entry") => "entries",
+            t if t.contains("System") => "systems",
+            t if t.contains("ConversionGraph") => "conversion_graphs",
+            _ => return Err(std::io::Error::new(ErrorKind::Other, "Unsupported type"))
+        };
+
+        let layouts = self.layouts.borrow();
+        let layout = layouts.get(type_key)
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No layout found for type"))?;
+
+        let mut writers = self.writers.borrow_mut();
+        let writer = writers.get_mut(type_key)
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No writer found for type"))?;
+
+        let offset = writer.seek(SeekFrom::End(0))?;
+
+        item.to_binary(writer, layout)?;
+        Ok((offset, item))
+    }
+}
+
+impl ToBinary for System {
+    fn to_binary(&self, writer: &mut BufWriter<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        // write living record
+        writer.write_all(&[1u8; 1])?;
+
+        for field in &layout.fields {
+            match field {
+                BinaryField::LengthPrefixed { name, length_type } => {
+                    let bytes = match *name {
+                        "system_id" => self.id.as_bytes(),
+                        "description" => self.description.as_bytes(),
+                        _ => {
+                            return Err(std::io::Error::new(
+                                ErrorKind::InvalidInput,
+                                format!("Unknown field in layout: {}", name),
+                            ));
+                        }
+                    };
+
+                    write_length_prefixed_field(writer, bytes, name, length_type)?;
+                }
+                other => {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Unexpected binary field in System layout: {:?}", other),
+                    ));
+                }
             }
         }
+        Ok(())
     }
-
-    Ok(())
 }
 
-pub fn write_transaction_bin(transaction: &Transaction, path: &Path) -> std::io::Result<()> {
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    
-    let mut writer = BufWriter::new(file);
+impl ToBinary for ConversionGraph {
+    fn to_binary(&self, writer: &mut BufWriter<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        // write living record
+        writer.write_all(&[1u8; 1])?;
 
-    let timestamp = transaction.timestamp.timestamp();
-    let description_bytes = transaction.description.as_bytes();
-    let description_len = description_bytes.len();
-    if description_len > 255 {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidData,
-            "Transaction description is too long",
-        ));
-    }
+        for field in &layout.fields {
+            match field {
+                BinaryField::LengthPrefixed { name, length_type } => {
+                    let bytes = match *name {
+                        "graph" => {
+                            let key_class = classify_graph_key(self);
 
-    writer.write_all(transaction.id.as_bytes())?;
-    writer.write_all(&[description_len as u8])?;
-    writer.write_all(description_bytes)?;
-
-    match &transaction.metadata {
-        Some(value) => {
-            writer.write_all(&[1])?;
-
-            let serialized_value = to_vec(value)?;
-            let len = serialized_value.len() as u32;
-
-            writer.write_all(&len.to_le_bytes())?;
-            writer.write_all(&serialized_value)?;
-        }
-        None => {}
-    }
-
-    writer.write_all(&timestamp.to_le_bytes())?;
-    
-    Ok(())
-}
-
-pub fn write_entry_bin(entry: &Entry, path: &Path) -> std::io::Result<()> {
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    
-    let mut writer = BufWriter::new(file);
-
-    writer.write_all(entry.id.as_bytes())?;
-    writer.write_all(entry.transaction_id.as_bytes())?;
-    writer.write_all(entry.account_id.as_bytes())?;
-    writer.write_all(&entry.amount.to_le_bytes())?;
-    
-    Ok(())
-}
-
-pub fn write_system_bin(system: &System, path: &Path) -> std::io::Result<()> {
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    
-    let mut writer = BufWriter::new(file);
-    let layout = system_layout();
-
-    for field in layout.fields {
-        match field {
-            BinaryField::LengthPrefixed { name, length_type } => {
-                let bytes = match name {
-                    "system_id" => system.id.as_bytes(),
-                    "description" => system.description.as_bytes(),
-                    _ => {
-                        return Err(std::io::Error::new(
-                            ErrorKind::InvalidInput,
-                            format!("Unknown field in layout: {}", name),
-                        ));
-                    }
-                };
-
-                write_length_prefixed_field(&mut writer, bytes, name, length_type)?;
-            }
-            other => {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Unexpected binary field in System layout: {:?}", other),
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub fn write_conversion_graph_bin(graph: &ConversionGraph, path: &Path) -> std::io::Result<()> {
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)?;
-    
-    let mut writer = BufWriter::new(file);
-    let layout = conversion_graph_layout();
-
-    for field in layout.fields {
-        match field {
-            BinaryField::LengthPrefixed { name, length_type } => {
-                let bytes = match name {
-                    "graph" => {
-                        let key_class = classify_graph_key(graph);
-
-                        match key_class {
-                            "active" => {
-                                format!("C[{}]", graph.graph).into_bytes()
-                            }
-                            "historical" => {
-                                format!("H[{}]", graph.graph).into_bytes()
-                            }
-                            _ => {
-                                return Err(std::io::Error::new(
-                                    ErrorKind::InvalidInput,
-                                    format!("Unknown graph key class: {}", key_class),
-                                ));
+                            match key_class {
+                                "active" => {
+                                    format!("C[{}]", self.graph).into_bytes()
+                                }
+                                "historical" => {
+                                    format!("H[{}]", self.graph).into_bytes()
+                                }
+                                _ => {
+                                    return Err(std::io::Error::new(
+                                        ErrorKind::InvalidInput,
+                                        format!("Unknown graph key class: {}", key_class),
+                                    ));
+                                }
                             }
                         }
-                    }
-                    _ => {
-                        return Err(std::io::Error::new(
-                            ErrorKind::InvalidInput,
-                            format!("Unknown field in layout: {}", name),
-                        ));
-                    }
-                };
+                        _ => {
+                            return Err(std::io::Error::new(
+                                ErrorKind::InvalidInput,
+                                format!("Unknown field in layout: {}", name),
+                            ));
+                        }
+                    };
 
-                write_length_prefixed_field(&mut writer, &bytes, name, length_type)?;
-            }
-            BinaryField::F64("rate") => {
-                writer.write_all(&graph.rate.to_le_bytes())?;
-            }
-            BinaryField::I64("rate_since") => {
-                let timestamp = graph.rate_since.timestamp();
-                writer.write_all(&timestamp.to_le_bytes())?;
-            }
-            other => {
-                return Err(std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Unexpected binary field in ConversionGraph layout: {:?}", other),
-                ));
+                    write_length_prefixed_field(writer, &bytes, name, &length_type)?;
+                }
+                BinaryField::F64("rate") => {
+                    writer.write_all(&self.rate.to_le_bytes())?;
+                }
+                BinaryField::I64("rate_since") => {
+                    let timestamp = self.rate_since.timestamp();
+                    writer.write_all(&timestamp.to_le_bytes())?;
+                }
+                other => {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Unexpected binary field in ConversionGraph layout: {:?}", other),
+                    ));
+                }
             }
         }
+        Ok(())
     }
+}
 
-    Ok(())
+impl ToBinary for Entry {
+    fn to_binary(&self, writer: &mut BufWriter<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        // write living record
+        writer.write_all(&[1u8; 1])?;
+
+        for field in &layout.fields {
+            match field {
+                BinaryField::Uuid("id") => {
+                    writer.write_all(self.id.as_bytes())?;
+                }
+                BinaryField::Uuid("transaction_id") => {
+                    writer.write_all(self.transaction_id.as_bytes())?;
+                }
+                BinaryField::Uuid("account_id") => {
+                    writer.write_all(self.account_id.as_bytes())?;
+                }
+                BinaryField::I64("amount") => {
+                    writer.write_all(&self.amount.to_le_bytes())?;
+                }
+                other => {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Unexpected binary field in Entry layout: {:?}", other),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ToBinary for Transaction {
+    fn to_binary(&self, writer: &mut BufWriter<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        // write living record
+        writer.write_all(&[1u8; 1])?;
+
+        for field in &layout.fields {
+            match field {
+                BinaryField::Uuid("id") => {
+                    writer.write_all(self.id.as_bytes())?;
+                }
+                BinaryField::LengthPrefixed { name, length_type } if *name == "description" => {
+                    let bytes = self.description.as_bytes();
+                    write_length_prefixed_field(writer, bytes, name, length_type)?;
+                }
+                BinaryField::LengthPrefixed { name, length_type } if *name == "metadata" => {
+                    let bytes = match &self.metadata {
+                        Some(val) => serde_json::to_vec(val)?,
+                        None => Vec::new(),
+                    };
+                    write_length_prefixed_field(writer, &bytes, name, length_type)?;
+                }
+                BinaryField::I64("timestamp") => {
+                    let timestamp = self.timestamp.timestamp();
+                    writer.write_all(&timestamp.to_le_bytes())?;
+                }
+                other => {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Unexpected binary field in Transaction layout: {:?}", other),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl ToBinary for Account {
+    fn to_binary(&self, writer: &mut BufWriter<File>, layout: &BinaryLayout) -> std::io::Result<()> {
+        // write living record
+        writer.write_all(&[1u8; 1])?;
+
+        for field in &layout.fields {
+            match field {
+                BinaryField::Uuid("id") => {
+                    writer.write_all(self.id.as_bytes())?;
+                }
+                BinaryField::U8("account_type") => {
+                    writer.write_all(&[account_type_to_u8(&self.account_type).unwrap()])?;
+                }
+                BinaryField::I64("created_at") => {
+                    let ts = self.created_at.timestamp();
+                    writer.write_all(&ts.to_le_bytes())?;
+                }
+                BinaryField::LengthPrefixed { name, length_type } if *name == "name" => {
+                    let bytes = self.name.as_bytes();
+                    write_length_prefixed_field(writer, bytes, name, length_type)?;
+                }
+                BinaryField::LengthPrefixed { name, length_type } if *name == "system_id" => {
+                    let bytes = self.system_id.as_bytes();
+                    write_length_prefixed_field(writer, bytes, name, length_type)?;
+                }
+                other => {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Unexpected binary field in Account layout: {:?}", other),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn compute_object_size(layout: &BinaryLayout, data: &[u8], offset: usize) -> std::io::Result<usize> {
@@ -746,7 +826,7 @@ fn classify_graph_key(graph: &ConversionGraph) -> &'static str {
     "unknown"
 }
 
-fn write_length_prefixed_field(writer: &mut BufWriter<File>, bytes: &[u8], name: &str, length_type: LengthType) -> std::io::Result<()> {
+fn write_length_prefixed_field(writer: &mut BufWriter<File>, bytes: &[u8], name: &str, length_type: &LengthType) -> std::io::Result<()> {
     let len = bytes.len();
     
     match length_type {
@@ -768,4 +848,27 @@ fn write_length_prefixed_field(writer: &mut BufWriter<File>, bytes: &[u8], name:
     }
 
     writer.write_all(bytes)
+}
+
+fn read_length_prefixed_string<R: std::io::Read>(reader: &mut R, length_type: &LengthType) -> std::io::Result<String> {
+    let len = match length_type {
+        LengthType::U8 => {
+            let mut buf = [0u8; 1];
+            reader.read_exact(&mut buf)?;
+            buf[0] as usize
+        }
+        LengthType::U16 => {
+            let mut buf = [0u8; 2];
+            reader.read_exact(&mut buf)?;
+            u16::from_le_bytes(buf) as usize
+        }
+        LengthType::U32 => {
+            let mut buf = [0u8; 4];
+            reader.read_exact(&mut buf)?;
+            u32::from_le_bytes(buf) as usize
+        }
+    };
+    let mut str_buf = vec![0u8; len];
+    reader.read_exact(&mut str_buf)?;
+    Ok(String::from_utf8(str_buf).unwrap_or_default())
 }

@@ -34,7 +34,7 @@ This allows Zentry to quickly identify record categories when scanning the `.bin
 
 ---
 
-### ⬜ Compress Zeroing with Tombstone Byte
+### ✅ Compress Zeroing with Tombstone Byte
 
 Rather than fully zeroing out old record space in the binary file, store a **1-byte tombstone prefix** at the beginning of each record:
 
@@ -46,8 +46,10 @@ This allows Zentry to:
 - Reduce write amplification compared to full zeroing
 - Optionally reclaim space later with compaction
 
-#### Binary Layout with Tombstone Byte
+#### ⬜ Binary Layout with Tombstone Byte
 
+_The persisted records are ubiquitously prefixed with a tombstone byte, but below layout is yet to be implemented._
+ 
 | Field              | Size     | Description                      |
 |-------------------|----------|----------------------------------|
 | Tombstone Flag     | 1 byte   | `0x01` = active, `0x00` = deleted |

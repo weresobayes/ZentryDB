@@ -5,7 +5,6 @@ use serde_json::{from_str, to_string};
 
 use crate::index::BTreeIndex;
 use crate::model::Entry;
-use crate::storage::binary::write_entry_bin;
 
 pub fn write_entry_bin_and_index(entry: &Entry, path: &Path, index: &mut BTreeIndex) -> std::io::Result<()> {
     let mut file = OpenOptions::new()
@@ -18,7 +17,6 @@ pub fn write_entry_bin_and_index(entry: &Entry, path: &Path, index: &mut BTreeIn
     write_entries(&entries)?;
 
     let offset = file.seek(SeekFrom::End(0))?;
-    write_entry_bin(entry, path)?;
     index.insert(entry.id, offset);
     
     Ok(())
