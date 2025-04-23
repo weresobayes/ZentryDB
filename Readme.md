@@ -1,7 +1,7 @@
 # Zentry
 
 
-a secure, fast, and minimal database engine for double-entry bookkeeping, purpose-built to serve as a transactional sentry in your system.
+A secure, fast, and minimal database engine for double-entry bookkeeping, purpose-built to serve as a transactional sentry in your system.
 
 
 ## 🧭 Why Zentry?
@@ -14,52 +14,52 @@ Zentry is designed to live alongside your services — as a sidecar, an embedded
 
 This is the ledger I always wanted to use — so I built it.
 
-## 🗺️ Next milestones:
+## 🗺️ Technical Implementation Milestones
 
-*Legends*
-
-- ⬜️ = Not started
-- ⬛️ = In progress
-- ❌ = Cancelled / Can't be done
-- ✅ = Completed
-
-### ✅ Prefix Record Type on Key
-
-To help distinguish record types during file scans and indexing, prefix the binary key with a tag:
-
-- `C[USD -> IDR]` // C = Current ConversionGraph 
-- `H[2025-04-12T07:16:23.479472314+00:00[IDR -> USD]2025-04-12T07:34:52.537529777+00:00]` // H = Historical ConversionGraph with effective range
-
-This allows Zentry to quickly identify record categories when scanning the `.bin` file or rebuilding the index, and makes parsing more robust.
+**Status Legend**: ⬜️ Not started | ⬛️ In progress | ❌ Cancelled | ✅ Completed
 
 ---
 
-### ✅ Compress Zeroing with Tombstone Byte
+### ✅ Record Type Prefixing
 
-Rather than fully zeroing out old record space in the binary file, store a **1-byte tombstone prefix** at the beginning of each record:
+**Spec**: Binary key prefixing for type identification
 
-- `0x01` → live record
-- `0x00` → tombstoned (obsolete)
+**Format**:
+- `C[key]` - Current records (e.g., `C[USD -> IDR]`)
+- `H[timestamp1[key]timestamp2]` - Historical records with effective range
 
-This allows Zentry to:
-- Quickly skip dead records during index rebuilding
-- Reduce write amplification compared to full zeroing
-- Optionally reclaim space later with compaction
-
-#### ⬜ Binary Layout with Tombstone Byte
-
-_The persisted records are ubiquitously prefixed with a tombstone byte, but below layout is yet to be implemented._
- 
-| Field              | Size     | Description                      |
-|-------------------|----------|----------------------------------|
-| Tombstone Flag     | 1 byte   | `0x01` = active, `0x00` = deleted |
-| Key Length         | 2 bytes  | Length of key string             |
-| Payload Length     | 4 bytes  | Length of the actual data        |
-| Timestamp (optional)| 8 bytes | Created or rate_since            |
-| Key + Payload      | N bytes  | Actual content                   |
-
-This structure improves durability, simplifies forward compatibility, and sets the stage for future compaction or defragmentation strategies.
-
-> 📝 This is optional for now. Keep it in the internal roadmap for Zentry v1.1 or later when introducing background compaction or snapshotting.
+**Benefits**:
+- O(1) record type detection during scanning
+- Simplified index rebuilding process
+- Type-based filtering without payload inspection
 
 ---
+
+### Binary Record Layout
+
+#### ⬛️ Tombstone Implementation
+
+**Spec**: 1-byte record state indicator
+- `0x01`: Active record
+- `0x00`: Tombstoned (deleted) record
+
+**Benefits**:
+- Efficient dead record skipping
+- Reduced write amplification
+- Enables space reclamation via compaction
+
+#### ⬜ Complete Binary Layout
+
+**Status**: Partially implemented, verification required
+
+| Field            | Size     | Description                    |
+|-----------------|----------|--------------------------------|
+| Tombstone       | 1 byte   | `0x01`=active, `0x00`=deleted  |
+| Key Length      | 2 bytes  | Length of prefixed key         |
+| Payload Length  | 4 bytes  | Data length                    |
+| Timestamp       | 8 bytes  | Optional: created/effective    |
+| Key + Payload   | N bytes  | Content                        |
+
+**Roadmap**: 
+- v1.0: Core binary layout with tombstone support
+- v1.1+: Compaction and snapshotting optimizations
