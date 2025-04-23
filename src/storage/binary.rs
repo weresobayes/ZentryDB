@@ -59,6 +59,8 @@ impl From<BinaryWriteError> for std::io::Error {
 }
 
 pub trait TombstoneReader {
+    fn is_ignorable_error(&self, e: &std::io::Error) -> bool;
+
     fn is_tombstone_byte(&self, byte: u8) -> bool {
         byte == 0x00
     }
@@ -321,8 +323,6 @@ impl FromBinary for System {
 
 impl FromBinary for ConversionGraph {
     fn from_binary(reader: &mut BufReader<File>, layout: &BinaryLayout) -> std::io::Result<Self> {
-        use std::io::Read;
-
         let mut graph = String::new();
         let mut rate = 0.0;
         let mut rate_since = Utc::now();
@@ -440,6 +440,17 @@ impl FromBinary for ConversionGraph {
 }
 
 impl TombstoneReader for BinaryStorage {
+    fn is_ignorable_error(&self, e: &std::io::Error) -> bool {
+        let msg = e.to_string();
+
+        matches!(
+            msg.as_str(), 
+            m if m.contains("Dead record")
+                || m.contains("Not enough data")
+                || m.contains("Not converting historical conversion graph")
+        )
+    }
+
     fn read<T>(&self) -> std::io::Result<Vec<T>>
     where
         T: FromBinary,
@@ -451,11 +462,7 @@ impl TombstoneReader for BinaryStorage {
                 Ok(i) => items.push(i),
                 Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
                 Err(e) => {
-                    if e.to_string().contains("Dead record") {
-                        continue;
-                    }
-
-                    if e.to_string().contains("Not enough data") {
+                    if self.is_ignorable_error(&e) {
                         continue;
                     }
 
@@ -487,6 +494,8 @@ impl TombstoneReader for BinaryStorage {
         let layout = self.layouts.get(type_key)
             .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No layout found for type"))?;
 
+        let reader_current_offset = reader.stream_position()?;
+
         let mut tombstone_buf = [0u8; 1];
         reader.read_exact(&mut tombstone_buf)?;
 
@@ -495,7 +504,15 @@ impl TombstoneReader for BinaryStorage {
             return Err(BinaryReadError::DeadRecord.into())
         }
 
-        T::from_binary(reader, layout)
+        match T::from_binary(reader, layout) {
+            Ok(item) => Ok(item),
+            Err(e) if e.kind() == ErrorKind::InvalidData && self.is_ignorable_error(&e) => {
+                reader.seek(SeekFrom::Start(reader_current_offset))?;
+                T::skip_bytes(reader, layout)?;
+                Err(e)
+            }
+            Err(e) => Err(e)
+        }
     }
 }
 
@@ -814,7 +831,7 @@ pub fn compute_object_size(layout: &BinaryLayout, data: &[u8], offset: usize) ->
 fn classify_graph_key(graph: &ConversionGraph) -> &'static str {
     let active_conversion_key_pattern = Regex::new(r"^\s*\w+\s*(->|<-|<->)\s*\w+\s*$").unwrap();
     let historical_conversion_key_pattern = Regex::new(
-        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+\d{2}:\d{2}\[\s*\w+\s*(->|<-|<->)\s*\w+\s*\]\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+\d{2}:\d{2}$"
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2}\[\s*\w+\s*(->|<-|<->)\s*\w+\s*\]\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2}$"
     ).unwrap();
 
     if historical_conversion_key_pattern.is_match(&graph.graph) {
