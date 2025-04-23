@@ -45,7 +45,7 @@ enum BinaryWriteError {
 impl From<BinaryReadError> for std::io::Error {
     fn from(error: BinaryReadError) -> Self {
         match error {
-            BinaryReadError::DeadRecord => std::io::Error::new(ErrorKind::Other, "Dead record"),
+            BinaryReadError::DeadRecord => std::io::Error::new(ErrorKind::Other, "dead record"),
         }
     }
 }
@@ -53,7 +53,7 @@ impl From<BinaryReadError> for std::io::Error {
 impl From<BinaryWriteError> for std::io::Error {
     fn from(error: BinaryWriteError) -> Self {
         match error {
-            BinaryWriteError::TryingToTombstoneWrongRecord => std::io::Error::new(ErrorKind::Other, "Trying to tombstone wrong record"),
+            BinaryWriteError::TryingToTombstoneWrongRecord => std::io::Error::new(ErrorKind::Other, "trying to tombstone wrong record"),
         }
     }
 }
@@ -122,15 +122,15 @@ impl BinaryStorage {
             t if t.contains("Entry") => "entries",
             t if t.contains("System") => "systems",
             t if t.contains("ConversionGraph") => "conversion_graphs",
-            _ => return Err(std::io::Error::new(ErrorKind::Other, "Unsupported type"))
+            _ => return Err(std::io::Error::new(ErrorKind::Other, "unsupported type"))
         };
 
         let mut readers = self.readers.borrow_mut();
         let reader = readers.get_mut(type_key)
-            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No reader found for type"))?;
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "no reader found for type"))?;
 
         let layout = self.layouts.get(type_key)
-            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No layout found for type"))?;
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "no layout found for type"))?;
 
         reader.seek(SeekFrom::Start(offset))?;
 
@@ -167,7 +167,7 @@ impl FromBinary for Account {
                     let mut buf = [0u8; 1];
                     reader.read_exact(&mut buf)?;
                     account_type = account_type_from_u8(buf[0])
-                        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "Unknown account type"))?;
+                        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "unknown account type"))?;
                 }
                 BinaryField::I64("created_at") => {
                     let mut buf = [0u8; 8];
@@ -359,7 +359,7 @@ impl FromBinary for ConversionGraph {
 
                         return Err(std::io::Error::new(
                             ErrorKind::InvalidData,
-                            "Not converting historical conversion graph, will come in improvement later",
+                            "not converting historical conversion graph, will come in improvement later",
                         ));
                     }
 
@@ -390,7 +390,7 @@ impl FromBinary for ConversionGraph {
                 _ => {
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
-                        "Invalid field for ConversionGraph",
+                        "invalid field for `ConversionGraph`",
                     ));
                 }
             }
@@ -445,9 +445,9 @@ impl TombstoneReader for BinaryStorage {
 
         matches!(
             msg.as_str(), 
-            m if m.contains("Dead record")
-                || m.contains("Not enough data")
-                || m.contains("Not converting historical conversion graph")
+            m if m.contains("dead record")
+                || m.contains("not enough data")
+                || m.contains("not converting historical conversion graph")
         )
     }
 
@@ -484,15 +484,15 @@ impl TombstoneReader for BinaryStorage {
             t if t.contains("Entry") => "entries",
             t if t.contains("System") => "systems",
             t if t.contains("ConversionGraph") => "conversion_graphs",
-            _ => return Err(std::io::Error::new(ErrorKind::Other, "Unsupported type"))
+            _ => return Err(std::io::Error::new(ErrorKind::Other, "unsupported type"))
         };
 
         let mut readers = self.readers.borrow_mut();
         let reader = readers.get_mut(type_key)
-            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No reader found for type"))?;
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "no reader found for type"))?;
 
         let layout = self.layouts.get(type_key)
-            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No layout found for type"))?;
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "no layout found for type"))?;
 
         let reader_current_offset = reader.stream_position()?;
 
@@ -527,7 +527,7 @@ impl TombstoneWriter for BinaryStorage {
             t if t.contains("Entry") => "entries",
             t if t.contains("System") => "systems",
             t if t.contains("ConversionGraph") => "conversion_graphs",
-            _ => return Err(std::io::Error::new(ErrorKind::Other, "Unsupported type"))
+            _ => return Err(std::io::Error::new(ErrorKind::Other, "unsupported type"))
         };
 
         let item_from_binary = self.read_single::<T>(offset)?;
@@ -541,7 +541,7 @@ impl TombstoneWriter for BinaryStorage {
 
         let mut writers = self.writers.borrow_mut();
         let writer = writers.get_mut(type_key)
-            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No writer found for type"))?;
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "no writer found for type"))?;
 
         writer.seek(SeekFrom::Start(offset))?;
         writer.write(&tombstone_buf)?;
@@ -560,16 +560,16 @@ impl TombstoneWriter for BinaryStorage {
             t if t.contains("Entry") => "entries",
             t if t.contains("System") => "systems",
             t if t.contains("ConversionGraph") => "conversion_graphs",
-            _ => return Err(std::io::Error::new(ErrorKind::Other, "Unsupported type"))
+            _ => return Err(std::io::Error::new(ErrorKind::Other, "unsupported type"))
         };
 
         let layouts = self.layouts.borrow();
         let layout = layouts.get(type_key)
-            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No layout found for type"))?;
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "no layout found for type"))?;
 
         let mut writers = self.writers.borrow_mut();
         let writer = writers.get_mut(type_key)
-            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "No writer found for type"))?;
+            .ok_or_else(|| std::io::Error::new(ErrorKind::Other, "no writer found for type"))?;
 
         let offset = writer.seek(SeekFrom::End(0))?;
 
@@ -592,7 +592,7 @@ impl ToBinary for System {
                         _ => {
                             return Err(std::io::Error::new(
                                 ErrorKind::InvalidInput,
-                                format!("Unknown field in layout: {}", name),
+                                format!("unknown field in layout: {}", name),
                             ));
                         }
                     };
@@ -602,7 +602,7 @@ impl ToBinary for System {
                 other => {
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
-                        format!("Unexpected binary field in System layout: {:?}", other),
+                        format!("unexpected binary field in `System` layout: {:?}", other),
                     ));
                 }
             }
@@ -633,7 +633,7 @@ impl ToBinary for ConversionGraph {
                                 _ => {
                                     return Err(std::io::Error::new(
                                         ErrorKind::InvalidInput,
-                                        format!("Unknown graph key class: {}", key_class),
+                                        format!("unknown graph key class: {}", key_class),
                                     ));
                                 }
                             }
@@ -641,7 +641,7 @@ impl ToBinary for ConversionGraph {
                         _ => {
                             return Err(std::io::Error::new(
                                 ErrorKind::InvalidInput,
-                                format!("Unknown field in layout: {}", name),
+                                format!("unknown field in layout: {}", name),
                             ));
                         }
                     };
@@ -658,7 +658,7 @@ impl ToBinary for ConversionGraph {
                 other => {
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
-                        format!("Unexpected binary field in ConversionGraph layout: {:?}", other),
+                        format!("unexpected binary field in `ConversionGraph` layout: {:?}", other),
                     ));
                 }
             }
@@ -689,7 +689,7 @@ impl ToBinary for Entry {
                 other => {
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
-                        format!("Unexpected binary field in Entry layout: {:?}", other),
+                        format!("unexpected binary field in `Entry` layout: {:?}", other),
                     ));
                 }
             }
@@ -726,7 +726,7 @@ impl ToBinary for Transaction {
                 other => {
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
-                        format!("Unexpected binary field in Transaction layout: {:?}", other),
+                        format!("unexpected binary field in `Transaction` layout: {:?}", other),
                     ));
                 }
             }
@@ -764,7 +764,7 @@ impl ToBinary for Account {
                 other => {
                     return Err(std::io::Error::new(
                         ErrorKind::InvalidData,
-                        format!("Unexpected binary field in Account layout: {:?}", other),
+                        format!("unexpected binary field in `Account` layout: {:?}", other),
                     ));
                 }
             }
@@ -801,7 +801,7 @@ pub fn compute_object_size(layout: &BinaryLayout, data: &[u8], offset: usize) ->
                 if cursor + len_size > data.len() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
-                        "Not enough data for length prefix",
+                        "not enough data for length prefix",
                     ));
                 }
 
@@ -859,7 +859,7 @@ fn write_length_prefixed_field(writer: &mut BufWriter<File>, bytes: &[u8], name:
         _ => {
             return Err(std::io::Error::new(
                 ErrorKind::InvalidData,
-                format!("{} is too long to encode", name),
+                format!("`{}` is too long to encode", name),
             ));
         }
     }

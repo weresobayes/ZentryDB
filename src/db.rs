@@ -185,7 +185,7 @@ impl Ledger {
         if parts.len() != 3 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Invalid graph format: {}", graph.graph),
+                format!("invalid graph format: {}", graph.graph),
             ));
         }
 
@@ -198,13 +198,13 @@ impl Ledger {
         if !self.systems.contains_key(&from_uuid) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Source system not found: {}", from_system),
+                format!("source system not found: {}", from_system),
             ));
         }
         if !self.systems.contains_key(&to_uuid) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Target system not found: {}", to_system),
+                format!("target system not found: {}", to_system),
             ));
         }
 
@@ -287,7 +287,7 @@ impl Ledger {
             _ => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Invalid direction: {}. Must be ->, <-, or <->", direction),
+                    format!("invalid direction: {}. must be ->, <-, or <->", direction),
                 ));
             }
         }
@@ -300,7 +300,7 @@ impl Ledger {
         if sum.abs() > f64::EPSILON {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Unbalanced transaction: total = {}", sum),
+                format!("unbalanced transaction: total = {}", sum),
             ));
         }
 
@@ -311,7 +311,7 @@ impl Ledger {
             let account = self.accounts.get(&acc_uuid).ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("Account not found: {}", entry.account_id),
+                    format!("account not found: {}", entry.account_id),
                 )
             })?;
 
@@ -327,7 +327,7 @@ impl Ledger {
             if !self.systems.contains_key(&system_id) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("System not found: {}", system_id),
+                    format!("system not found: {}", system_id),
                 ));
             }
 
@@ -335,7 +335,7 @@ impl Ledger {
             if system_sum.abs() > f64::EPSILON {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Unbalanced entries in system {}: sum = {}", system_id, system_sum),
+                    format!("unbalanced entries in system {}: sum = {}", system_id, system_sum),
                 ));
             }
         }
